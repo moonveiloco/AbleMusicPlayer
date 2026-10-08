@@ -31,12 +31,17 @@ import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import io.github.uditkarode.able.R
+import io.github.uditkarode.able.adapters.DiscoverResultAdapter
 import io.github.uditkarode.able.adapters.YtResultAdapter
 import io.github.uditkarode.able.adapters.YtmResultAdapter
 import io.github.uditkarode.able.databinding.SearchBinding
+import io.github.uditkarode.able.model.discovery.ArtistSuggestion
+import io.github.uditkarode.able.model.discovery.TrackSuggestion
 import io.github.uditkarode.able.model.song.Song
+import io.github.uditkarode.able.utils.LastFmClient
 import io.github.uditkarode.able.utils.Shared
 import io.github.uditkarode.able.utils.SwipeController
+import io.github.uditkarode.able.utils.TrackResolver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -58,6 +63,9 @@ class Search : Fragment(), CoroutineScope {
 
     companion object {
         val resultArray = ArrayList<Song>()
+
+        /** Last.fm suggestions (TrackSuggestion / ArtistSuggestion) shown in Discover mode. */
+        val suggestArray = ArrayList<Any>()
     }
 
     interface SongCallback {
@@ -118,6 +126,15 @@ class Search : Fragment(), CoroutineScope {
                     )
                 )
             }
+
+            "Discover" -> {
+                _binding!!.searchMode.setImageDrawable(
+                    ContextCompat.getDrawable(
+                        requireContext(),
+                        R.drawable.mode_discover
+                    )
+                )
+            }
         }
 
         View.OnClickListener {
@@ -143,6 +160,16 @@ class Search : Fragment(), CoroutineScope {
                 }
 
                 "Playlists" -> {
+                    sp.edit().putString("mode", "Discover").apply()
+                    _binding!!.searchMode.setImageDrawable(
+                        ContextCompat.getDrawable(
+                            requireContext(),
+                            R.drawable.mode_discover
+                        )
+                    )
+                }
+
+                "Discover" -> {
                     sp.edit().putString("mode", "Music").apply()
                     _binding!!.searchMode.setImageDrawable(
                         ContextCompat.getDrawable(
@@ -200,8 +227,13 @@ class Search : Fragment(), CoroutineScope {
                                 .getString("source_key", "Youtube Music") == "Youtube Music")
                         }
 
+                        val discoverMode = sp.getString("mode", "Music") == "Discover"
                         launch(Dispatchers.IO) {
-                            if (useYtMusic) {
+                            if (discoverMode) {
+                                val suggestions = LastFmClient.searchTracks(query)
+                                suggestArray.clear()
+                                suggestArray.addAll(suggestions)
+                            } else if (useYtMusic) {
                                 when (sp.getString("mode", "Music")) {
                                     "Music" -> {
                                         val extractor = YouTube.getSearchExtractor(
@@ -298,7 +330,19 @@ class Search : Fragment(), CoroutineScope {
                             }
 
                             launch(Dispatchers.Main) {
-                                if (useYtMusic)
+                                if (discoverMode) {
+                                    if (suggestArray.isEmpty())
+                                        Toast.makeText(
+                                            requireContext(),
+                                            R.string.disc_no_suggestions,
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    searchRv.adapter = DiscoverResultAdapter(
+                                        suggestArray,
+                                        onTrackPressed = { onDiscoverTrackPressed(it) },
+                                        onArtistPressed = { onDiscoverArtistPressed(it) }
+                                    )
+                                } else if (useYtMusic)
                                     searchRv.adapter =
                                         YtmResultAdapter(
                                             resultArray,
@@ -314,14 +358,16 @@ class Search : Fragment(), CoroutineScope {
                                 searchRv.alpha = 0f
                                 searchRv.visibility = View.VISIBLE
                                 searchRv.animate().alpha(1f).duration = 200
-                                val itemTouchHelper = ItemTouchHelper(
-                                    SwipeController(
-                                        context,
-                                        "Search",
-                                        null
+                                if (!discoverMode) {
+                                    val itemTouchHelper = ItemTouchHelper(
+                                        SwipeController(
+                                            context,
+                                            "Search",
+                                            null
+                                        )
                                     )
-                                )
-                                itemTouchHelper.attachToRecyclerView(searchRv)
+                                    itemTouchHelper.attachToRecyclerView(searchRv)
+                                }
                             }
                         }
                     } catch (e: Exception) {
@@ -341,6 +387,63 @@ class Search : Fragment(), CoroutineScope {
             itemPressed.sendItem(song)
         else
             Toast.makeText(requireContext(), "No Internet Connection", Toast.LENGTH_LONG).show()
+    }
+
+    /** Resolves a Last.fm suggestion on YouTube Music, then hands the Song to MainActivity. */
+    private fun onDiscoverTrackPressed(track: TrackSuggestion) {
+        if (!Shared.isInternetConnected(requireContext())) {
+            Toast.makeText(requireContext(), "No Internet Connection", Toast.LENGTH_LONG).show()
+            return
+        }
+        _binding?.let {
+            it.loadingView.progress = 0.3080229f
+            it.loadingView.visibility = View.VISIBLE
+            it.loadingView.playAnimation()
+        }
+        launch(Dispatchers.IO) {
+            val song = try { TrackResolver.resolve(track) } catch (e: Exception) { null }
+            launch(Dispatchers.Main) {
+                _binding?.let {
+                    it.loadingView.pauseAnimation()
+                    it.loadingView.visibility = View.GONE
+                }
+                if (song == null)
+                    Toast.makeText(requireContext(), R.string.disc_yt_fail, Toast.LENGTH_SHORT).show()
+                else
+                    itemPressed(song)
+            }
+        }
+    }
+
+    /** Drill-down: shows an artist's top tracks as new suggestions. */
+    private fun onDiscoverArtistPressed(artist: ArtistSuggestion) {
+        _binding?.let {
+            it.loadingView.progress = 0.3080229f
+            it.loadingView.visibility = View.VISIBLE
+            it.loadingView.playAnimation()
+        }
+        launch(Dispatchers.IO) {
+            val tracks = try { LastFmClient.artistTopTracks(artist.name) } catch (e: Exception) { emptyList() }
+            launch(Dispatchers.Main) {
+                _binding?.let {
+                    it.loadingView.pauseAnimation()
+                    it.loadingView.visibility = View.GONE
+                }
+                if (tracks.isEmpty())
+                    Toast.makeText(
+                        requireContext(),
+                        getString(R.string.disc_no_artist_tracks, artist.name),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                suggestArray.clear()
+                suggestArray.addAll(tracks)
+                view?.findViewById<RecyclerView>(R.id.search_rv)?.adapter = DiscoverResultAdapter(
+                    suggestArray,
+                    onTrackPressed = { onDiscoverTrackPressed(it) },
+                    onArtistPressed = { onDiscoverArtistPressed(it) }
+                )
+            }
+        }
     }
 
     private fun hideKeyboard(activity: Activity) {

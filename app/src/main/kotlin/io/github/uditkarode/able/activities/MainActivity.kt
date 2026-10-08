@@ -143,7 +143,7 @@ class MainActivity : MusicClientActivity(), Search.SongCallback {
 
         home = Home()
         mainContent.isUserInputEnabled = false
-        mainContent.offscreenPageLimit = 3
+        mainContent.offscreenPageLimit = 4
         mainContent.adapter = ViewPagerAdapter(this, home)
         var currentPage = 0
         bottomNavigation = binding.bottomNavigation
@@ -153,6 +153,7 @@ class MainActivity : MusicClientActivity(), Search.SongCallback {
                 R.id.search_menu -> 1
                 R.id.library_menu -> 2
                 R.id.settings_menu -> 3
+                R.id.discover_menu -> 4
                 else -> 0
             }
             if (newPage != currentPage) {

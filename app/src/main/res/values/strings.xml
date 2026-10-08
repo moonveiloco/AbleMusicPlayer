@@ -117,4 +117,20 @@ or via the UPI address %2$s</string>
     <string name="downloads_waiting">Waiting…</string>
     <string name="downloads_spotify_title">Spotify Import</string>
     <string name="downloads_spotify_idle">No import in progress</string>
+
+    <!-- Discovery -->
+    <string name="discover">Discover</string>
+    <string name="disc_top_tracks">Top Tracks</string>
+    <string name="disc_top_artists">Top Artists</string>
+    <string name="disc_local_tracks">Local Tracks</string>
+    <string name="disc_local_artists">Local Artists</string>
+    <string name="disc_genres">Genres</string>
+    <string name="disc_similar">Similar</string>
+    <string name="disc_pick_genre">Pick a genre</string>
+    <string name="disc_no_suggestions">No suggestions right now</string>
+    <string name="disc_no_genres">Couldn\'t load genres</string>
+    <string name="disc_play_first">Play something first, then come back!</string>
+    <string name="disc_unknown_artist">Unknown artist — can\'t find similar tracks</string>
+    <string name="disc_no_artist_tracks">No tracks for %1$s</string>
+    <string name="disc_yt_fail">Couldn\'t find this track on YouTube</string>
 </resources>

@@ -1,6 +1,18 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
 }
+
+// Local secrets (LASTFM_API_KEY) live in local.properties (git-ignored) or any
+// gradle.properties (~/.gradle or project root). Falls back to an empty string.
+val localSecrets = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+val lastFmApiKey = providers.gradleProperty("LASTFM_API_KEY")
+    .orElse(providers.provider { localSecrets.getProperty("LASTFM_API_KEY") ?: "" })
+    .get()
 
 android {
     namespace = "io.github.uditkarode.able"
@@ -17,6 +29,8 @@ android {
             viewBinding = true
             buildConfig = true
         }
+
+        buildConfigField("String", "LASTFM_API_KEY", "\"$lastFmApiKey\"")
     }
 
     splits {
