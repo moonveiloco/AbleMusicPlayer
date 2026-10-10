@@ -58,6 +58,10 @@ class DiscographyAdapter(
         private const val TYPE_ALBUM = 0
         private const val TYPE_TRACK = 1
         private const val TYPE_SINGLES_HEADER = 2
+
+        /** Sentinel row: the "Singles" section header. Companion-scoped so
+         *  it is initialized before any instance `init` block uses it. */
+        private val SINGLES_MARKER = Any()
     }
 
     private fun rebuild() {
@@ -148,10 +152,6 @@ class DiscographyAdapter(
             }
         }
     }
-
-    /** Sentinel row: the "Singles" section header. */
-    private object SinglesMarker
-    private val SINGLES_MARKER = SinglesMarker
 
     class AlbumVH(itemView: View) : RecyclerView.ViewHolder(itemView) {
         val name: TextView = itemView.findViewById(R.id.album_name)
