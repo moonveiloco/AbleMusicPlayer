@@ -27,6 +27,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
 import androidx.fragment.app.Fragment
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.afollestad.materialdialogs.MaterialDialog
@@ -43,6 +44,7 @@ import io.github.uditkarode.able.model.song.SongState
 import io.github.uditkarode.able.services.MusicService
 import io.github.uditkarode.able.services.SpotifyImportService
 import io.github.uditkarode.able.utils.Shared
+import io.github.uditkarode.able.utils.ViewMode
 /**
  * The third fragment. Used to view/edit/play locally stored playlists.
  * Playlists are stored in the JSON format.
@@ -69,13 +71,30 @@ class Playlists : Fragment(), MusicService.MusicClient {
         _binding!!.playlistsRv.visibility = if (isEmpty) View.GONE else View.VISIBLE
     }
 
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        super.onViewCreated(view, savedInstanceState)
+    /** (Re)builds the adapter + layout manager according to the list/grid preference. */
+    private fun applyViewMode() {
+        if (_binding == null) return
+        val grid = ViewMode.isGrid(requireContext())
+        _binding!!.playlistsViewMode.setImageResource(
+            if (grid) R.drawable.ic_list else R.drawable.ic_grid
+        )
+        _binding!!.playlistsRv.layoutManager =
+            if (grid) GridLayoutManager(requireContext(), 2)
+            else LinearLayoutManager(requireContext())
         _binding!!.playlistsRv.adapter = PlaylistAdapter(Shared.getPlaylists())
-        _binding!!.playlistsRv.layoutManager = LinearLayoutManager(requireContext())
         _binding!!.playlistsRv.adapter?.registerAdapterDataObserver(object : RecyclerView.AdapterDataObserver() {
             override fun onChanged() { updateEmptyState() }
         })
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        applyViewMode()
+        _binding!!.playlistsViewMode.setOnClickListener {
+            ViewMode.toggle(requireContext())
+            applyViewMode()
+            updateEmptyState()
+        }
         updateEmptyState()
         var inputId = ""
         _binding!!.spotbut.setOnClickListener {

@@ -9,7 +9,7 @@
 
     AbleMusicPlayer is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
 
     You should have received a copy of the GNU General Public License
@@ -26,34 +26,32 @@ import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.afollestad.materialdialogs.MaterialDialog
-import com.afollestad.materialdialogs.bottomsheets.BottomSheet
-import com.afollestad.materialdialogs.list.listItems
 import io.github.uditkarode.able.R
 import io.github.uditkarode.able.adapters.DiscoverResultAdapter
 import io.github.uditkarode.able.databinding.DiscoverBinding
-import io.github.uditkarode.able.model.discovery.ArtistSuggestion
+import io.github.uditkarode.able.model.Playlist
 import io.github.uditkarode.able.model.discovery.TrackSuggestion
-import io.github.uditkarode.able.services.MusicService
+import io.github.uditkarode.able.model.song.Song
+import io.github.uditkarode.able.utils.ApiKeyProvider
 import io.github.uditkarode.able.utils.LastFmClient
+import io.github.uditkarode.able.utils.LastFmKeyPrompt
+import io.github.uditkarode.able.utils.Shared
 import io.github.uditkarode.able.utils.TrackResolver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.launch
-import java.util.Locale
 
 /**
- * Fifth tab. Song discovery powered by the Last.fm public API: global charts,
- * country charts, genre tags and "similar to what's playing" suggestions.
+ * Fifth tab. Playlist-based discovery: shows the user's playlists; picking
+ * one generates track suggestions seeded by the tracks in that playlist
+ * (Last.fm "similar tracks" aggregated and ranked).
  */
 class Discover : Fragment(), CoroutineScope {
     private lateinit var itemPressed: Search.SongCallback
@@ -65,9 +63,14 @@ class Discover : Fragment(), CoroutineScope {
     companion object {
         private const val TAG = "Discover"
 
-        /** Last.fm geo methods require the English country name. */
-        fun currentCountry(): String =
-            Locale.getDefault().getDisplayCountry(Locale.ENGLISH).ifBlank { "Italy" }
+        /** How many playlist tracks to use as seeds. */
+        private const val SEEDS = 5
+
+        /** Suggestions kept per seed track. */
+        private const val PER_SEED = 5
+
+        /** Max suggestions shown. */
+        private const val MAX_RESULTS = 30
     }
 
     override fun onDestroy() {
@@ -98,91 +101,99 @@ class Discover : Fragment(), CoroutineScope {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-
-        addChip(R.string.disc_top_tracks) { loadTracks { LastFmClient.topTracks() } }
-        addChip(R.string.disc_top_artists) { loadArtists { LastFmClient.topArtists() } }
-        addChip(R.string.disc_local_tracks) { loadTracks { LastFmClient.geoTopTracks(currentCountry()) } }
-        addChip(R.string.disc_local_artists) { loadArtists { LastFmClient.geoTopArtists(currentCountry()) } }
-        addChip(R.string.disc_genres) { pickGenre() }
-        addChip(R.string.disc_similar) { loadSimilar() }
-
-        // Preload the first source so the tab isn't empty.
-        binding.discoverChips.getChildAt(0).performClick()
+        binding.discoverBack.setOnClickListener { showPlaylists() }
+        showPlaylists()
     }
 
-    // region source loading
+    // region playlist list
 
-    private fun loadTracks(fetch: () -> List<TrackSuggestion>) {
-        setLoading(true)
-        launch(Dispatchers.IO) {
-            val suggestions = try { fetch() } catch (e: Exception) {
-                Log.e(TAG, "Discovery fetch failed", e); emptyList()
-            }
-            launch(Dispatchers.Main) { showSuggestions(suggestions) }
-        }
-    }
-
-    private fun loadArtists(fetch: () -> List<ArtistSuggestion>) {
-        setLoading(true)
-        launch(Dispatchers.IO) {
-            val suggestions = try { fetch() } catch (e: Exception) {
-                Log.e(TAG, "Discovery fetch failed", e); emptyList()
-            }
-            launch(Dispatchers.Main) { showSuggestions(suggestions) }
-        }
-    }
-
-    private fun pickGenre() {
-        setLoading(true)
-        launch(Dispatchers.IO) {
-            val tags = try { LastFmClient.topTags() } catch (e: Exception) {
-                Log.e(TAG, "Tag fetch failed", e); emptyList()
-            }
-            launch(Dispatchers.Main) {
-                setLoading(false)
-                if (tags.isEmpty()) {
-                    showEmpty(getString(R.string.disc_no_genres))
-                    return@launch
-                }
-                MaterialDialog(requireContext(), BottomSheet()).show {
-                    title(R.string.disc_genres)
-                    listItems(items = tags) { _, index, _ ->
-                        loadTracks { LastFmClient.tagTopTracks(tags[index]) }
-                    }
-                }
-            }
-        }
-    }
-
-    private fun loadSimilar() {
-        val current = MusicService.playQueue.getOrNull(MusicService.currentIndex)
-        if (current == null) {
-            showEmpty(getString(R.string.disc_play_first))
+    private fun showPlaylists() {
+        val playlists = Shared.getPlaylists()
+        binding.discoverBack.visibility = View.GONE
+        if (playlists.isEmpty()) {
+            showEmpty(getString(R.string.disc_no_playlists))
             return
         }
-        if (current.artist.isBlank()) {
-            showEmpty(getString(R.string.disc_unknown_artist))
-            return
-        }
-        loadTracks { LastFmClient.similarTracks(current.artist, current.name) }
+        val rv = binding.discoverRv
+        rv.adapter = PlaylistPickAdapter(playlists) { pick(it) }
+        rv.layoutManager = LinearLayoutManager(requireContext())
+        binding.discoverEmpty.visibility = View.GONE
+        rv.alpha = 0f
+        rv.visibility = View.VISIBLE
+        rv.animate().alpha(1f).duration = 200
+    }
+
+    /** Seed track list for a playlist: spread evenly across it. */
+    private fun seedsFor(songs: List<Song>): List<Song> {
+        val usable = songs.filter { it.artist.isNotBlank() && it.name.isNotBlank() }
+        return if (usable.size <= SEEDS) usable
+        else (0 until SEEDS).map { usable[it * usable.size / SEEDS] }
     }
 
     // endregion
 
-    // region rendering
+    // region suggestions
 
-    private fun showSuggestions(items: List<Any>) {
-        setLoading(false)
-        val rv = binding.discoverRv
-        if (items.isEmpty()) {
-            showEmpty(getString(R.string.disc_no_suggestions))
+    private fun pick(playlist: Playlist) {
+        if (!Shared.isInternetConnected(requireContext())) {
+            Toast.makeText(requireContext(), "No Internet Connection", Toast.LENGTH_LONG).show()
             return
         }
+        if (!ApiKeyProvider.hasLastFmKey) {
+            LastFmKeyPrompt.showIfMissing(requireContext())
+            return
+        }
+        setLoading(true)
+        binding.discoverBack.visibility = View.VISIBLE
+        launch(Dispatchers.IO) {
+            val songs = Shared.getSongsFromPlaylist(playlist)
+            val playlistKeys = songs.map { it.name.lowercase() + "|" + it.artist.lowercase() }.toSet()
+            val aggregated = LinkedHashMap<String, Pair<TrackSuggestion, Int>>()
+            for (seed in seedsFor(songs)) {
+                val similar = try {
+                    LastFmClient.similarTracks(seed.artist, seed.name)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Similar tracks failed for ${seed.name}", e); emptyList()
+                }
+                for (suggestion in similar.take(PER_SEED)) {
+                    val key = suggestion.name.lowercase() + "|" + suggestion.artist.lowercase()
+                    if (key in playlistKeys) continue
+                    val hit = aggregated[key]
+                    if (hit == null) aggregated[key] = suggestion to 1
+                    else aggregated[key] = hit.first to hit.second + 1
+                }
+            }
+            val results = aggregated.values
+                .sortedWith(
+                    compareByDescending<Pair<TrackSuggestion, Int>> { it.second }
+                        .thenByDescending { it.first.listeners.toLongOrNull() ?: 0 }
+                )
+                .take(MAX_RESULTS)
+                .map { it.first }
+
+            launch(Dispatchers.Main) {
+                if (songs.isEmpty()) {
+                    binding.discoverBack.visibility = View.GONE
+                    showEmpty(getString(R.string.disc_playlist_unusable))
+                    return@launch
+                }
+                if (results.isEmpty()) {
+                    showEmpty(getString(R.string.disc_no_suggestions))
+                    return@launch
+                }
+                showSuggestions(results)
+            }
+        }
+    }
+
+    private fun showSuggestions(items: List<TrackSuggestion>) {
+        setLoading(false)
+        val rv = binding.discoverRv
         binding.discoverEmpty.visibility = View.GONE
         rv.adapter = DiscoverResultAdapter(
-            items,
+            ArrayList<Any>(items),
             onTrackPressed = ::onTrackPressed,
-            onArtistPressed = ::onArtistPressed
+            onArtistPressed = { }
         )
         rv.layoutManager = LinearLayoutManager(requireContext())
         rv.alpha = 0f
@@ -210,31 +221,9 @@ class Discover : Fragment(), CoroutineScope {
         }
     }
 
-    // endregion
-
-    // region item handling
-
-    private fun onArtistPressed(artist: ArtistSuggestion) {
-        setLoading(true)
-        launch(Dispatchers.IO) {
-            val tracks = try { LastFmClient.artistTopTracks(artist.name) } catch (e: Exception) {
-                Log.e(TAG, "Artist drill-down failed", e); emptyList()
-            }
-            launch(Dispatchers.Main) {
-                if (tracks.isEmpty())
-                    showEmpty(getString(R.string.disc_no_artist_tracks, artist.name))
-                else
-                    showSuggestions(tracks)
-            }
-        }
-    }
-
-    /**
-     * Lazy resolution: the Last.fm suggestion has no playable URL yet, so we first
-     * look the track up on YouTube Music and only then hand it to MainActivity.
-     */
+    /** Resolves the Last.fm suggestion on YouTube Music, then plays it via MainActivity. */
     private fun onTrackPressed(track: TrackSuggestion) {
-        if (!io.github.uditkarode.able.utils.Shared.isInternetConnected(requireContext())) {
+        if (!Shared.isInternetConnected(requireContext())) {
             Toast.makeText(requireContext(), "No Internet Connection", Toast.LENGTH_LONG).show()
             return
         }
@@ -255,43 +244,41 @@ class Discover : Fragment(), CoroutineScope {
 
     // endregion
 
-    // region chips
+}
 
-    private fun addChip(labelRes: Int, onClick: () -> Unit) {
-        val chip = TextView(requireContext()).apply {
-            text = getString(labelRes)
-            textSize = 14f
-            setTextColor(ContextCompat.getColor(requireContext(), android.R.color.white))
-            typeface = Typeface.createFromAsset(requireContext().assets, "fonts/intersemibold.otf")
-            background = ContextCompat.getDrawable(requireContext(), R.drawable.rounded_rectangle)
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-            setOnClickListener {
-                highlightChip(this)
-                onClick()
-            }
-        }
-        val params = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
+/**
+ * Renders the user's playlists (row layout shared with the Playlists tab);
+ * tapping one seeds the suggestions.
+ */
+private class PlaylistPickAdapter(
+    private var playlists: ArrayList<Playlist>,
+    private val onPicked: (Playlist) -> Unit
+) : RecyclerView.Adapter<PlaylistPickAdapter.VH>() {
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH =
+        VH(
+            LayoutInflater.from(parent.context)
+                .inflate(R.layout.playlist_item, parent, false)
         )
-        params.marginEnd = dp(8)
-        binding.discoverChips.addView(chip, params)
+
+    override fun getItemCount() = playlists.size
+
+    override fun onBindViewHolder(holder: VH, position: Int) {
+        val playlist = playlists[position]
+        val context = holder.itemView.context
+        holder.name.text = playlist.name
+        holder.count.text = context.getString(
+            R.string.song_count, Shared.getSongsFromPlaylist(playlist).size
+        )
+        holder.name.typeface =
+            Typeface.createFromAsset(context.assets, "fonts/interbold.otf")
+        holder.count.typeface =
+            Typeface.createFromAsset(context.assets, "fonts/inter.otf")
+        holder.itemView.setOnClickListener { onPicked(playlist) }
     }
 
-    private fun highlightChip(selected: TextView) {
-        for (i in 0 until binding.discoverChips.childCount) {
-            val child = binding.discoverChips.getChildAt(i) as TextView
-            child.setTextColor(
-                ContextCompat.getColor(
-                    requireContext(),
-                    if (child === selected) R.color.colorAccent else android.R.color.white
-                )
-            )
-        }
+    class VH(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        val name: TextView = itemView.findViewById(R.id.playlist_name)
+        val count: TextView = itemView.findViewById(R.id.number_songs)
     }
-
-    private fun dp(value: Int): Int =
-        (value * resources.displayMetrics.density).toInt()
-
-    // endregion
 }

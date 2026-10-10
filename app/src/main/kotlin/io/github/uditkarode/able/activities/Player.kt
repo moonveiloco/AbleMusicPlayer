@@ -29,6 +29,7 @@ import android.os.IBinder
 import android.util.Log
 import android.view.TouchDelegate
 import android.view.View
+import android.widget.Toast
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.ProgressBar
@@ -58,13 +59,19 @@ import io.github.uditkarode.able.AbleApplication
 import io.github.uditkarode.able.R
 import io.github.uditkarode.able.adapters.SongAdapter
 import io.github.uditkarode.able.databinding.PlayerBinding
+import io.github.uditkarode.able.adapters.DiscoverResultAdapter
 import io.github.uditkarode.able.fragments.Home
+import io.github.uditkarode.able.model.discovery.TrackSuggestion
 import io.github.uditkarode.able.model.song.Song
 import io.github.uditkarode.able.model.song.SongState
 import io.github.uditkarode.able.services.MusicService
+import io.github.uditkarode.able.utils.ApiKeyProvider
 import io.github.uditkarode.able.utils.Constants
+import io.github.uditkarode.able.utils.LastFmClient
+import io.github.uditkarode.able.utils.LastFmKeyPrompt
 import io.github.uditkarode.able.utils.MusicClientActivity
 import io.github.uditkarode.able.utils.Shared
+import io.github.uditkarode.able.utils.TrackResolver
 import androidx.activity.OnBackPressedCallback
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -123,6 +130,8 @@ class Player : MusicClientActivity() {
         binding.playerDownArrow.setOnClickListener {
             finish()
         }
+
+        binding.playerDiscover.setOnClickListener { showSimilarSheet() }
 
         binding.shuffleButton.setOnClickListener {
             if (onShuffle) {
@@ -947,6 +956,75 @@ class Player : MusicClientActivity() {
             } else {
                 centerLoadingSpinner.visibility = View.GONE
                 binding.playerCenterIcon.visibility = View.VISIBLE
+            }
+        }
+    }
+
+    /**
+     * Discovery on the playing track: bottom sheet with Last.fm suggestions
+     * similar to the song currently in `playQueue[currentIndex]`.
+     */
+    private fun showSimilarSheet() {
+        val current = MusicService.playQueue.getOrNull(MusicService.currentIndex)
+        if (current == null) {
+            Toast.makeText(this, R.string.disc_play_first, Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (current.artist.isBlank()) {
+            Toast.makeText(this, R.string.disc_unknown_artist, Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!ApiKeyProvider.hasLastFmKey) {
+            LastFmKeyPrompt.showIfMissing(this)
+            return
+        }
+        launch(Dispatchers.IO) {
+            val tracks = try {
+                LastFmClient.similarTracks(current.artist, current.name)
+            } catch (e: Exception) {
+                Log.e("Player", "Similar tracks failed", e); emptyList()
+            }
+            launch(Dispatchers.Main) {
+                if (tracks.isEmpty()) {
+                    Toast.makeText(this@Player, R.string.disc_no_suggestions, Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                MaterialDialog(this@Player, BottomSheet()).show {
+                    title(R.string.disc_similar)
+                    customListAdapter(
+                        DiscoverResultAdapter(
+                            ArrayList<Any>(tracks),
+                            onTrackPressed = { suggestion -> addToQueue(suggestion) },
+                            onArtistPressed = { }
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    /** Resolves a suggestion on YouTube Music and inserts it right after the current song. */
+    private fun addToQueue(suggestion: TrackSuggestion) {
+        val svc = mService
+        if (svc == null) {
+            Toast.makeText(this, R.string.disc_yt_fail, Toast.LENGTH_SHORT).show()
+            return
+        }
+        launch(Dispatchers.IO) {
+            val song = try { TrackResolver.resolve(suggestion) } catch (e: Exception) {
+                Log.e("Player", "Resolution failed for ${suggestion.name}", e); null
+            }
+            launch(Dispatchers.Main) {
+                if (song == null) {
+                    Toast.makeText(this@Player, R.string.disc_yt_fail, Toast.LENGTH_SHORT).show()
+                } else {
+                    svc.addToPlayQueue(song)
+                    Toast.makeText(
+                        this@Player,
+                        getString(R.string.disc_added_to_queue, song.name),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
             }
         }
     }

@@ -39,6 +39,8 @@ import io.github.uditkarode.able.databinding.AlbumplaylistBinding
 import io.github.uditkarode.able.model.song.Song
 import io.github.uditkarode.able.services.MusicService
 import io.github.uditkarode.able.utils.Shared
+import io.github.uditkarode.able.utils.ViewMode
+import android.widget.ImageView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import kotlinx.coroutines.CoroutineScope
@@ -95,6 +97,19 @@ class AlbumPlaylist : AppCompatActivity(), CoroutineScope {
             .diskCacheStrategy(DiskCacheStrategy.NONE)
             .skipMemoryCache(true)
             .into(binding.playbumArt)
+
+        binding.playlistViewMode.apply {
+            setImageResource(ViewMode.toggleIcon(this@AlbumPlaylist))
+            setOnClickListener { v ->
+                val grid = ViewMode.toggle(this@AlbumPlaylist)
+                (v as ImageView).setImageResource(ViewMode.toggleIcon(this@AlbumPlaylist))
+                if (resultArray.isNotEmpty()) {
+                    binding.apRv.adapter =
+                        PlaybumAdapter(resultArray, WeakReference(this@AlbumPlaylist), "Song")
+                    binding.apRv.layoutManager = ViewMode.layoutManagerFor(this@AlbumPlaylist)
+                }
+            }
+        }
 
         binding.playbumPlay.setOnClickListener {
             var freshStart = false
@@ -170,7 +185,7 @@ class AlbumPlaylist : AppCompatActivity(), CoroutineScope {
             launch(Dispatchers.Main) {
                 binding.apRv.adapter =
                     PlaybumAdapter(resultArray, WeakReference(this@AlbumPlaylist), "Song")
-                binding.apRv.layoutManager = LinearLayoutManager(this@AlbumPlaylist)
+                binding.apRv.layoutManager = ViewMode.layoutManagerFor(this@AlbumPlaylist)
                 binding.loadingView.visibility = View.GONE
                 binding.loadingView.pauseAnimation()
                 binding.apRv.alpha = 0f

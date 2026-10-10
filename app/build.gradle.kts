@@ -4,8 +4,9 @@ plugins {
     id("com.android.application")
 }
 
-// Local secrets (LASTFM_API_KEY) live in local.properties (git-ignored) or any
-// gradle.properties (~/.gradle or project root). Falls back to an empty string.
+// Legacy fallback only: the Last.fm key is now imported from inside the app
+// (see ApiKeyProvider / LastFmKeyPrompt). Local builds may still provide it in
+// local.properties (git-ignored) or gradle.properties (~/.gradle or project root).
 val localSecrets = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) f.inputStream().use { load(it) }

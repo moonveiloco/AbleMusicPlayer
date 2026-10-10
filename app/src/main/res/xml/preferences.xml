@@ -21,6 +21,14 @@
         android:key="mode_key"
         />
 
+    <SwitchPreferenceCompat
+        android:key="view_mode_grid"
+        android:defaultValue="false"
+        app:iconSpaceReserved="false"
+        android:title="@string/pref_view_mode"
+        android:summary="@string/pref_view_mode_sum"
+        />
+
     <Preference
         android:title="@string/downloads_title"
         app:iconSpaceReserved="false"

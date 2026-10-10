@@ -28,6 +28,7 @@ import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
 import io.github.uditkarode.able.R
+import io.github.uditkarode.able.utils.ViewMode
 import io.github.uditkarode.able.model.discovery.ArtistSuggestion
 import io.github.uditkarode.able.model.discovery.TrackSuggestion
 import java.text.NumberFormat
@@ -47,7 +48,12 @@ class DiscoverResultAdapter(
     private val numberFormat = NumberFormat.getIntegerInstance(Locale.getDefault())
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RVVH =
-        RVVH(LayoutInflater.from(parent.context).inflate(R.layout.rv_ytm_result, parent, false))
+        RVVH(
+            LayoutInflater.from(parent.context).inflate(
+                if (ViewMode.isGrid(parent.context)) R.layout.rv_grid_result else R.layout.rv_ytm_result,
+                parent, false
+            )
+        )
 
     override fun getItemCount() = items.size
 

@@ -22,14 +22,21 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
+import android.graphics.Typeface
 import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.preference.PreferenceManager
 import androidx.recyclerview.widget.ItemTouchHelper
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.afollestad.materialdialogs.MaterialDialog
+import com.afollestad.materialdialogs.bottomsheets.BottomSheet
+import com.afollestad.materialdialogs.list.listItems
 import io.github.uditkarode.able.R
 import io.github.uditkarode.able.adapters.DiscoverResultAdapter
 import io.github.uditkarode.able.adapters.YtResultAdapter
@@ -38,10 +45,13 @@ import io.github.uditkarode.able.databinding.SearchBinding
 import io.github.uditkarode.able.model.discovery.ArtistSuggestion
 import io.github.uditkarode.able.model.discovery.TrackSuggestion
 import io.github.uditkarode.able.model.song.Song
+import io.github.uditkarode.able.utils.ApiKeyProvider
 import io.github.uditkarode.able.utils.LastFmClient
+import io.github.uditkarode.able.utils.LastFmKeyPrompt
 import io.github.uditkarode.able.utils.Shared
 import io.github.uditkarode.able.utils.SwipeController
 import io.github.uditkarode.able.utils.TrackResolver
+import io.github.uditkarode.able.utils.ViewMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -74,6 +84,9 @@ class Search : Fragment(), CoroutineScope {
 
     override val coroutineContext = Dispatchers.Main + SupervisorJob()
     private var _binding: SearchBinding? = null
+
+    /** Active swipe controller for YT/YTM results; detached for discovery lists. */
+    private var searchItemTouchHelper: ItemTouchHelper? = null
 
     private val binding get() = _binding!!
 
@@ -186,7 +199,169 @@ class Search : Fragment(), CoroutineScope {
         _binding!!.loadingView.enableMergePathsForKitKatAndAbove(true)
         _binding!!.loadingView.progress = 0.3080229f
         getItems(view.findViewById(R.id.search_bar), view.findViewById(R.id.search_rv))
+        setupDiscoveryChips()
+
+        _binding!!.searchViewMode.apply {
+            setImageResource(if (ViewMode.isGrid(requireContext())) R.drawable.ic_list else R.drawable.ic_grid)
+            setOnClickListener {
+                val grid = ViewMode.toggle(requireContext())
+                setImageResource(if (grid) R.drawable.ic_list else R.drawable.ic_grid)
+                renderResultsForViewMode()
+            }
+        }
     }
+
+    /** Re-renders whichever list is on screen after a list/grid switch. */
+    private fun renderResultsForViewMode() {
+        val rv = _binding?.searchRv ?: return
+        if (rv.visibility != View.VISIBLE) return
+        val ctx = requireContext()
+        val grid = ViewMode.isGrid(ctx)
+        rv.layoutManager =
+            if (grid) GridLayoutManager(ctx, 2) else LinearLayoutManager(ctx)
+        when {
+            suggestArray.isNotEmpty() ->
+                rv.adapter = DiscoverResultAdapter(
+                    suggestArray,
+                    onTrackPressed = { onDiscoverTrackPressed(it) },
+                    onArtistPressed = { onDiscoverArtistPressed(it) }
+                )
+            resultArray.isNotEmpty() && PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getString("source_key", "Youtube Music") == "Youtube Music" ->
+                rv.adapter = YtmResultAdapter(
+                    resultArray, WeakReference(this@Search),
+                    sp.getString("mode", "Music") ?: "Music"
+                )
+            resultArray.isNotEmpty() ->
+                rv.adapter = YtResultAdapter(resultArray, WeakReference(this@Search))
+        }
+    }
+
+    // region discovery chips (always visible, below the search bar)
+
+    /** Global Last.fm sources shown as chips: only user-independent ones. */
+    private fun setupDiscoveryChips() {
+        val container = _binding!!.searchChips
+        addChip(container, R.string.disc_top_tracks) { loadDiscoverTracks { LastFmClient.topTracks() } }
+        addChip(container, R.string.disc_top_artists) { loadDiscoverArtists { LastFmClient.topArtists() } }
+        addChip(container, R.string.disc_genres) { pickDiscoverGenre() }
+        // Preload the first source so the tab isn't empty (cached for 30 min).
+        if (suggestArray.isEmpty()) container.getChildAt(0).performClick()
+    }
+
+    private fun addChip(container: LinearLayout, labelRes: Int, onClick: () -> Unit) {
+        val chip = TextView(requireContext()).apply {
+            text = getString(labelRes)
+            textSize = 14f
+            setTextColor(ContextCompat.getColor(requireContext(), android.R.color.white))
+            typeface = Typeface.createFromAsset(requireContext().assets, "fonts/intersemibold.otf")
+            background = ContextCompat.getDrawable(requireContext(), R.drawable.rounded_rectangle)
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            setOnClickListener {
+                highlightChip(container, this)
+                onClick()
+            }
+        }
+        val params = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+        params.marginEnd = dp(8)
+        container.addView(chip, params)
+    }
+
+    private fun highlightChip(container: LinearLayout, selected: TextView) {
+        for (i in 0 until container.childCount) {
+            val child = container.getChildAt(i) as TextView
+            child.setTextColor(
+                ContextCompat.getColor(
+                    requireContext(),
+                    if (child === selected) R.color.colorAccent else android.R.color.white
+                )
+            )
+        }
+    }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
+
+    private fun loadDiscoverTracks(fetch: () -> List<TrackSuggestion>) {
+        if (!ApiKeyProvider.hasLastFmKey) { LastFmKeyPrompt.showIfMissing(requireContext()); return }
+        setDiscoverLoading(true)
+        launch(Dispatchers.IO) {
+            val suggestions = try { fetch() } catch (e: Exception) { emptyList<TrackSuggestion>() }
+            launch(Dispatchers.Main) { showDiscoverSuggestions(ArrayList<Any>(suggestions)) }
+        }
+    }
+
+    private fun loadDiscoverArtists(fetch: () -> List<ArtistSuggestion>) {
+        if (!ApiKeyProvider.hasLastFmKey) { LastFmKeyPrompt.showIfMissing(requireContext()); return }
+        setDiscoverLoading(true)
+        launch(Dispatchers.IO) {
+            val suggestions = try { fetch() } catch (e: Exception) { emptyList<ArtistSuggestion>() }
+            launch(Dispatchers.Main) { showDiscoverSuggestions(ArrayList<Any>(suggestions)) }
+        }
+    }
+
+    private fun pickDiscoverGenre() {
+        if (!ApiKeyProvider.hasLastFmKey) { LastFmKeyPrompt.showIfMissing(requireContext()); return }
+        setDiscoverLoading(true)
+        launch(Dispatchers.IO) {
+            val tags = try { LastFmClient.topTags() } catch (e: Exception) { emptyList<String>() }
+            launch(Dispatchers.Main) {
+                setDiscoverLoading(false)
+                if (tags.isEmpty()) {
+                    Toast.makeText(requireContext(), R.string.disc_no_genres, Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                MaterialDialog(requireContext(), BottomSheet()).show {
+                    title(R.string.disc_genres)
+                    listItems(items = tags) { _, index, _ ->
+                        loadDiscoverTracks { LastFmClient.tagTopTracks(tags[index]) }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun setDiscoverLoading(loading: Boolean) {
+        _binding?.loadingView?.apply {
+            if (loading) {
+                progress = 0.3080229f
+                visibility = View.VISIBLE
+                playAnimation()
+            } else {
+                pauseAnimation()
+                visibility = View.GONE
+            }
+        }
+    }
+
+    /** Renders discovery results on `search_rv`, disabling the search swipe controller. */
+    private fun showDiscoverSuggestions(items: List<Any>) {
+        setDiscoverLoading(false)
+        val rv = _binding?.searchRv ?: return
+        if (items.isEmpty()) {
+            Toast.makeText(requireContext(), R.string.disc_no_suggestions, Toast.LENGTH_SHORT).show()
+            return
+        }
+        suggestArray.clear()
+        suggestArray.addAll(items)
+        searchItemTouchHelper?.attachToRecyclerView(null)
+        rv.adapter = DiscoverResultAdapter(
+            suggestArray,
+            onTrackPressed = { onDiscoverTrackPressed(it) },
+            onArtistPressed = { onDiscoverArtistPressed(it) }
+        )
+        rv.layoutManager =
+            if (ViewMode.isGrid(requireContext())) GridLayoutManager(requireContext(), 2)
+            else LinearLayoutManager(requireContext())
+        rv.alpha = 0f
+        rv.visibility = View.VISIBLE
+        rv.animate().alpha(1f).duration = 200
+    }
+
+    // endregion
 
     private fun getItems(searchBar: EditText, searchRv: RecyclerView) {
         searchBar.setOnEditorActionListener { _, actionId, _ ->
@@ -230,6 +405,17 @@ class Search : Fragment(), CoroutineScope {
                         val discoverMode = sp.getString("mode", "Music") == "Discover"
                         launch(Dispatchers.IO) {
                             if (discoverMode) {
+                                // No key configured yet → show the import prompt instead of searching.
+                                if (!ApiKeyProvider.hasLastFmKey) {
+                                    launch(Dispatchers.Main) {
+                                        _binding?.loadingView?.apply {
+                                            pauseAnimation()
+                                            visibility = View.GONE
+                                        }
+                                        LastFmKeyPrompt.showIfMissing(requireContext())
+                                    }
+                                    return@launch
+                                }
                                 val suggestions = LastFmClient.searchTracks(query)
                                 suggestArray.clear()
                                 suggestArray.addAll(suggestions)
@@ -352,7 +538,10 @@ class Search : Fragment(), CoroutineScope {
                                 else
                                     searchRv.adapter =
                                         YtResultAdapter(resultArray, WeakReference(this@Search))
-                                searchRv.layoutManager = LinearLayoutManager(requireContext())
+                                searchRv.layoutManager =
+                                    if (ViewMode.isGrid(requireContext()))
+                                        GridLayoutManager(requireContext(), 2)
+                                    else LinearLayoutManager(requireContext())
                                 _binding!!.loadingView.visibility = View.GONE
                                 _binding!!.loadingView.pauseAnimation()
                                 searchRv.alpha = 0f
@@ -367,6 +556,7 @@ class Search : Fragment(), CoroutineScope {
                                         )
                                     )
                                     itemTouchHelper.attachToRecyclerView(searchRv)
+                                    searchItemTouchHelper = itemTouchHelper
                                 }
                             }
                         }

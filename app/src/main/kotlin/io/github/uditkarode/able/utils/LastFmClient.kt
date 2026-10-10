@@ -23,7 +23,6 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
-import io.github.uditkarode.able.BuildConfig
 import io.github.uditkarode.able.model.discovery.ArtistSuggestion
 import io.github.uditkarode.able.model.discovery.TrackSuggestion
 import okhttp3.OkHttpClient
@@ -49,6 +48,18 @@ object LastFmClient {
     /** Cache entry lifetime in milliseconds. */
     private const val CACHE_TTL_MS = 30L * 60 * 1000
 
+    /** Last.fm artwork hashes for the generic gray-star placeholder. */
+    private val PLACEHOLDER_HASHES = setOf(
+        "2a96cbd8b46e442fc41c2b86b821562f", // album/track placeholder
+        "c6f59c1e5e7248a8c33aba0087ea49d0"  // artist placeholder
+    )
+
+    /** Max artwork lookups done per list to stay under the 5 req/s limit. */
+    private const val ART_FALLBACK_BUDGET = 15
+
+    /** Delay between artwork fallback calls (5 req/s → 200+ ms). */
+    private const val ART_FALLBACK_DELAY_MS = 210L
+
     private val http = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
@@ -57,7 +68,7 @@ object LastFmClient {
     /** Simple in-memory cache: key -> (payload, timestamp). */
     private val cache = HashMap<String, Pair<String, Long>>()
 
-    private val hasKey: Boolean get() = BuildConfig.LASTFM_API_KEY.isNotBlank()
+    private val hasKey: Boolean get() = ApiKeyProvider.hasLastFmKey
 
     /** chart.getTopTracks — most-played tracks globally. */
     fun topTracks(): List<TrackSuggestion> = callTracks("chart.gettoptracks")
@@ -97,7 +108,51 @@ object LastFmClient {
             .filter { it.isNotBlank() }
     }
 
+    /** track.getInfo — richer metadata incl. the real album art. */
+    private fun trackInfoImage(artist: String, track: String): String {
+        val root = infoObject("track.getinfo", listOf("artist" to artist, "track" to track))
+            ?: return ""
+        val fromAlbum = (root.get("album") as? JsonObject)?.bestImage().orEmpty()
+        val best = if (fromAlbum.isNotBlank() && !isPlaceholderImage(fromAlbum))
+            fromAlbum else root.bestImage()
+        return if (isPlaceholderImage(best)) "" else best
+    }
+
+    /** artist.getInfo — real artist artwork. */
+    private fun artistInfoImage(artist: String): String {
+        val root = infoObject("artist.getinfo", listOf("artist" to artist)) ?: return ""
+        val best = root.bestImage()
+        return if (isPlaceholderImage(best)) "" else best
+    }
+
+    /** Fetches a getInfo response and returns the wrapped track/artist object. */
+    private fun infoObject(method: String, params: List<Pair<String, String>>): JsonObject? {
+        val json = cachedJson(method, params) ?: return null
+        val root = try { JsonParser.parseString(json) } catch (_: Exception) { return null }
+        if (!root.isJsonObject) return null
+        val obj = root.asJsonObject
+        return (obj.get("track") as? JsonObject) ?: (obj.get("artist") as? JsonObject)
+    }
+
+    private fun isPlaceholderImage(url: String): Boolean =
+        PLACEHOLDER_HASHES.any { url.contains(it) }
+
     // region internals
+
+    /** Live validation of a candidate API key (used by the in-app import prompt). */
+    fun validateKey(candidate: String): Boolean {
+        if (candidate.isBlank()) return false
+        val url = "$BASE?method=chart.gettoptags&format=json&api_key=$candidate"
+        return try {
+            http.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                val body = resp.body?.string() ?: return false
+                !body.contains("\"error\"")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "API key validation failed", e)
+            false
+        }
+    }
 
     private fun callTracks(method: String, vararg params: Pair<String, String>): List<TrackSuggestion> {
         val root = cachedJson(method, params.toList()) ?: return emptyList()
@@ -115,6 +170,7 @@ object LastFmClient {
                 )
             }
             .filter { it.artist.isNotBlank() }
+            .enrichTrackArt()
     }
 
     private fun callArtists(method: String, vararg params: Pair<String, String>): List<ArtistSuggestion> {
@@ -130,6 +186,42 @@ object LastFmClient {
                     mbid = it.stringField("mbid") ?: ""
                 )
             }
+            .enrichArtistArt()
+    }
+
+    /**
+     * Last.fm often answers `track.search` / `chart.gettoptracks` with the
+     * generic gray-star placeholder instead of real artwork. Re-fetch the
+     * missing/placeholder images one by one via `track.getInfo`, which has
+     * the proper album art, respecting the 5 req/s rate limit.
+     */
+    private fun List<TrackSuggestion>.enrichTrackArt(): List<TrackSuggestion> {
+        var budget = ART_FALLBACK_BUDGET
+        for (suggestion in this) {
+            if (budget == 0) break
+            if (suggestion.image.isNotBlank() && !isPlaceholderImage(suggestion.image)) continue
+            if (suggestion.artist.isBlank() || suggestion.name.isBlank()) continue
+            budget--
+            try { Thread.sleep(ART_FALLBACK_DELAY_MS) } catch (_: InterruptedException) {}
+            val real = trackInfoImage(suggestion.artist, suggestion.name)
+            if (real.isNotBlank()) suggestion.image = real
+        }
+        return this
+    }
+
+    /** Same fallback for artists, via `artist.getInfo`. */
+    private fun List<ArtistSuggestion>.enrichArtistArt(): List<ArtistSuggestion> {
+        var budget = ART_FALLBACK_BUDGET
+        for (suggestion in this) {
+            if (budget == 0) break
+            if (suggestion.image.isNotBlank() && !isPlaceholderImage(suggestion.image)) continue
+            if (suggestion.name.isBlank()) continue
+            budget--
+            try { Thread.sleep(ART_FALLBACK_DELAY_MS) } catch (_: InterruptedException) {}
+            val real = artistInfoImage(suggestion.name)
+            if (real.isNotBlank()) suggestion.image = real
+        }
+        return this
     }
 
     /**
@@ -201,7 +293,7 @@ object LastFmClient {
         val url = StringBuilder(BASE)
             .append("?method=").append(method)
             .append("&format=json")
-            .append("&api_key=").append(BuildConfig.LASTFM_API_KEY)
+            .append("&api_key=").append(ApiKeyProvider.lastFmApiKey)
         params.forEach { (k, v) ->
             url.append("&").append(k).append("=").append(java.net.URLEncoder.encode(v, "UTF-8"))
         }

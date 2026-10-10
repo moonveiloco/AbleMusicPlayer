@@ -120,6 +120,15 @@ or via the UPI address %2$s</string>
 
     <!-- Discovery -->
     <string name="discover">Discover</string>
+    <string name="txt_view_mode">Switch list / grid view</string>
+    <string name="pref_view_mode">Grid view</string>
+    <string name="pref_view_mode_sum">Show lists as a cover grid by default</string>
+    <string name="lastfm_key_title">Last.fm API key</string>
+    <string name="lastfm_key_message">Discovery needs a free Last.fm API key. Create one at https://www.last.fm/api/account/create and paste it here.</string>
+    <string name="lastfm_key_hint">API key</string>
+    <string name="lastfm_key_save">Save</string>
+    <string name="lastfm_key_saved">API key saved!</string>
+    <string name="lastfm_key_invalid">Invalid API key — check it and try again</string>
     <string name="disc_top_tracks">Top Tracks</string>
     <string name="disc_top_artists">Top Artists</string>
     <string name="disc_local_tracks">Local Tracks</string>
@@ -133,4 +142,9 @@ or via the UPI address %2$s</string>
     <string name="disc_unknown_artist">Unknown artist — can\'t find similar tracks</string>
     <string name="disc_no_artist_tracks">No tracks for %1$s</string>
     <string name="disc_yt_fail">Couldn\'t find this track on YouTube</string>
+    <string name="disc_added_to_queue">Up next: %1$s</string>
+    <string name="disc_back_to_playlists">‹ My playlists</string>
+    <string name="disc_pick_playlist">Discover from a playlist</string>
+    <string name="disc_no_playlists">Create a playlist first to get suggestions</string>
+    <string name="disc_playlist_unusable">No usable tracks in this playlist</string>
 </resources>
