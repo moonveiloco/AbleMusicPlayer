@@ -33,39 +33,67 @@ import io.github.uditkarode.able.model.discovery.TrackSuggestion
 import io.github.uditkarode.able.utils.LastFmClient
 
 /**
- * Renders an artist's discography as a flat list with album header rows
- * (art + title + year) followed by the album's tracks, and a final
- * "Singles" section with the leftover top tracks. Always a vertical list —
- * section headers would be confusing in a grid.
+ * Renders an artist's discography: collapsed album headers (art + title +
+ * year + track count, tap to expand/collapse the tracks inline, newest
+ * first) followed by a "Singles" section with the leftover top tracks.
+ * Always a vertical list — section headers would be confusing in a grid.
  */
 class DiscographyAdapter(
-    private val items: List<Any>,
-    private val singles: Set<String>,
+    private val albums: List<AlbumSuggestion>,
+    private val singles: List<TrackSuggestion>,
     private val onTrackPressed: (TrackSuggestion) -> Unit
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+
+    /** Album names currently expanded inline. */
+    private val expanded = HashSet<String>()
+
+    /** Flat render list, rebuilt when an album toggles. */
+    private val rows = ArrayList<Any>()
+
+    init {
+        rebuild()
+    }
 
     companion object {
         private const val TYPE_ALBUM = 0
         private const val TYPE_TRACK = 1
+        private const val TYPE_SINGLES_HEADER = 2
     }
 
-    override fun getItemViewType(position: Int): Int =
-        if (items[position] is AlbumSuggestion) TYPE_ALBUM else TYPE_TRACK
+    private fun rebuild() {
+        rows.clear()
+        for (album in albums) {
+            rows.add(album)
+            if (album.name in expanded) rows.addAll(album.tracks)
+        }
+        if (singles.isNotEmpty()) {
+            rows.add(SINGLES_MARKER)
+            rows.addAll(singles)
+        }
+    }
+
+    override fun getItemViewType(position: Int): Int = when {
+        rows[position] === SINGLES_MARKER -> TYPE_SINGLES_HEADER
+        rows[position] is AlbumSuggestion -> TYPE_ALBUM
+        else -> TYPE_TRACK
+    }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         val inflater = LayoutInflater.from(parent.context)
-        return if (viewType == TYPE_ALBUM)
-            AlbumVH(inflater.inflate(R.layout.rv_album_header, parent, false))
-        else
-            TrackVH(inflater.inflate(R.layout.rv_ytm_result, parent, false))
+        return when (viewType) {
+            TYPE_ALBUM -> AlbumVH(inflater.inflate(R.layout.rv_album_header, parent, false))
+            TYPE_SINGLES_HEADER ->
+                SinglesVH(inflater.inflate(R.layout.rv_section_header, parent, false))
+            else -> TrackVH(inflater.inflate(R.layout.rv_ytm_result, parent, false))
+        }
     }
 
-    override fun getItemCount() = items.size
+    override fun getItemCount() = rows.size
 
     override fun onBindViewHolder(holderRaw: RecyclerView.ViewHolder, position: Int) {
         val context = holderRaw.itemView.context
         holderRaw.itemView.tag = position
-        when (val item = items[position]) {
+        when (val item = rows[position]) {
             is AlbumSuggestion -> {
                 val holder = holderRaw as AlbumVH
                 holder.name.text = item.name
@@ -76,7 +104,16 @@ class DiscographyAdapter(
                     append(" • ")
                     append(item.tracks.size)
                 }
-                holder.itemView.setOnClickListener(null)
+                holder.year.typeface =
+                    Typeface.createFromAsset(context.assets, "fonts/inter.otf")
+                holder.chevron.text =
+                    if (item.name in expanded) "▾" else "▸"
+                holder.itemView.setOnClickListener {
+                    if (item.name in expanded) expanded.remove(item.name)
+                    else expanded.add(item.name)
+                    rebuild()
+                    notifyDataSetChanged()
+                }
                 if (item.image.isNotBlank() && !LastFmClient.isPlaceholderImage(item.image)) {
                     holder.artProgress.visibility = View.GONE
                     Glide.with(context)
@@ -96,9 +133,7 @@ class DiscographyAdapter(
                     Typeface.createFromAsset(context.assets, "fonts/interbold.otf")
                 holder.uploader.typeface =
                     Typeface.createFromAsset(context.assets, "fonts/inter.otf")
-                holder.uploader.text =
-                    if (item.name.lowercase() in singles) context.getString(R.string.disc_singles)
-                    else item.artist
+                holder.uploader.text = item.artist
                 holder.itemView.setOnClickListener { onTrackPressed(item) }
                 if (item.image.isNotBlank() && !LastFmClient.isPlaceholderImage(item.image)) {
                     holder.artProgress.visibility = View.GONE
@@ -114,12 +149,21 @@ class DiscographyAdapter(
         }
     }
 
+    /** Sentinel row: the "Singles" section header. */
+    private object SinglesMarker
+    private val SINGLES_MARKER = SinglesMarker
+
     class AlbumVH(itemView: View) : RecyclerView.ViewHolder(itemView) {
         val name: TextView = itemView.findViewById(R.id.album_name)
         val year: TextView = itemView.findViewById(R.id.album_year)
+        val chevron: TextView = itemView.findViewById(R.id.album_chevron)
         val art: ImageView = itemView.findViewById(R.id.album_art)
         val artProgress: android.widget.ProgressBar =
             itemView.findViewById(R.id.album_art_progress)
+    }
+
+    class SinglesVH(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        val title: TextView = itemView.findViewById(R.id.section_title)
     }
 
     class TrackVH(itemView: View) : RecyclerView.ViewHolder(itemView) {

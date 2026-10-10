@@ -34,6 +34,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_toEndOf="@+id/album_art_frame"
+        android:layout_toStartOf="@+id/album_chevron"
         android:layout_centerVertical="true"
         android:layout_marginStart="10dp"
         android:orientation="vertical">
@@ -57,5 +58,16 @@
             android:textSize="13sp" />
 
     </LinearLayout>
+
+    <TextView
+        android:id="@+id/album_chevron"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentEnd="true"
+        android:layout_centerVertical="true"
+        android:layout_marginEnd="10dp"
+        android:text="▸"
+        android:textColor="#94BCE3"
+        android:textSize="18sp" />
 
 </RelativeLayout>

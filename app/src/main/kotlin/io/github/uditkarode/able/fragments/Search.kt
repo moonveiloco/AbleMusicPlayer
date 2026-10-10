@@ -660,15 +660,12 @@ class Search : Fragment(), CoroutineScope {
                 compareByDescending<AlbumSuggestion> { it.year != 0 }
                     .thenByDescending { it.year }
             )
-            val discography = ArrayList<Any>(ordered)
-            discography.addAll(singles)
-            val singlesKeys = singles.map { it.name.lowercase() }.toSet()
 
             launch(Dispatchers.Main) {
                 if (!inDrillDown) return@launch // user went back in the meantime
                 setDiscoverLoading(false)
                 val rv = _binding?.searchRv ?: return@launch
-                if (discography.isEmpty()) {
+                if (ordered.isEmpty() && singles.isEmpty()) {
                     Toast.makeText(
                         requireContext(), R.string.disc_no_discography, Toast.LENGTH_SHORT
                     ).show()
@@ -676,7 +673,7 @@ class Search : Fragment(), CoroutineScope {
                     return@launch
                 }
                 searchItemTouchHelper?.attachToRecyclerView(null)
-                rv.adapter = DiscographyAdapter(discography, singlesKeys) {
+                rv.adapter = DiscographyAdapter(ordered, singles) {
                     onDiscoverTrackPressed(it)
                 }
                 rv.layoutManager = LinearLayoutManager(requireContext())
@@ -692,7 +689,31 @@ class Search : Fragment(), CoroutineScope {
         inDrillDown = false
         backCallback?.isEnabled = false
         _binding?.searchBack?.visibility = View.GONE
-        if (suggestArray.isNotEmpty()) showDiscoverSuggestions(suggestArray)
+        if (suggestArray.isEmpty()) return
+        // Render from a copy: showDiscoverSuggestions clears its input first.
+        val restored = ArrayList<Any>(suggestArray)
+        val rv = _binding?.searchRv ?: return
+        searchItemTouchHelper?.attachToRecyclerView(null)
+        rv.adapter = DiscoverResultAdapter(
+            restored,
+            onTrackPressed = { onDiscoverTrackPressed(it) },
+            onArtistPressed = { onDiscoverArtistPressed(it) }
+        )
+        rv.layoutManager =
+            if (ViewMode.isGrid(requireContext())) GridLayoutManager(requireContext(), 2)
+            else LinearLayoutManager(requireContext())
+        rv.alpha = 0f
+        rv.visibility = View.VISIBLE
+        rv.animate().alpha(1f).duration = 200
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // The back callback is registered per-view-lifecycle; drop the drill
+        // state so returning to the tab starts clean.
+        inDrillDown = false
+        backCallback?.isEnabled = false
+        _binding?.searchBack?.visibility = View.GONE
     }
 
     private fun hideKeyboard(activity: Activity) {
