@@ -74,12 +74,11 @@ class Playlists : Fragment(), MusicService.MusicClient {
     /** (Re)builds the adapter + layout manager according to the list/grid preference. */
     private fun applyViewMode() {
         if (_binding == null) return
-        val grid = ViewMode.isGrid(requireContext())
         _binding!!.playlistsViewMode.setImageResource(
-            if (grid) R.drawable.ic_list else R.drawable.ic_grid
+            ViewMode.toggleIcon(requireContext())
         )
         _binding!!.playlistsRv.layoutManager =
-            if (grid) GridLayoutManager(requireContext(), 2)
+            if (ViewMode.isGrid(requireContext())) GridLayoutManager(requireContext(), 2)
             else LinearLayoutManager(requireContext())
         _binding!!.playlistsRv.adapter = PlaylistAdapter(Shared.getPlaylists())
         _binding!!.playlistsRv.adapter?.registerAdapterDataObserver(object : RecyclerView.AdapterDataObserver() {

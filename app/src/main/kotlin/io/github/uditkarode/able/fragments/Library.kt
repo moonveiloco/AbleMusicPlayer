@@ -126,12 +126,11 @@ class Library : Fragment(), CoroutineScope {
     /** (Re)builds the adapter + layout manager according to the list/grid preference. */
     private fun applyViewMode() {
         if (_binding == null) return
-        val grid = ViewMode.isGrid(requireContext())
         binding.libraryViewMode.setImageResource(
-            if (grid) R.drawable.ic_list else R.drawable.ic_grid
+            ViewMode.toggleIcon(requireContext())
         )
         binding.libraryRv.layoutManager =
-            if (grid) GridLayoutManager(requireContext(), 2)
+            if (ViewMode.isGrid(requireContext())) GridLayoutManager(requireContext(), 2)
             else LinearLayoutManager(requireContext())
         adapter = LibraryGroupAdapter(lastGroups) { group ->
             openDetail(group.label)

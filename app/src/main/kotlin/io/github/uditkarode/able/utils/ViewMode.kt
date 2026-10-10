@@ -51,7 +51,7 @@ object ViewMode {
     fun layoutManagerFor(context: Context): RecyclerView.LayoutManager =
         if (isGrid(context)) GridLayoutManager(context, 2) else LinearLayoutManager(context)
 
-    /** Icon a toggle should show to offer switching to the *other* view. */
+    /** Icon a toggle should show: it reflects the *currently active* view. */
     fun toggleIcon(context: Context): Int =
-        if (isGrid(context)) R.drawable.ic_list else R.drawable.ic_grid
+        if (isGrid(context)) R.drawable.ic_grid else R.drawable.ic_list
 }

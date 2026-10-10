@@ -202,10 +202,10 @@ class Search : Fragment(), CoroutineScope {
         setupDiscoveryChips()
 
         _binding!!.searchViewMode.apply {
-            setImageResource(if (ViewMode.isGrid(requireContext())) R.drawable.ic_list else R.drawable.ic_grid)
+            setImageResource(ViewMode.toggleIcon(requireContext()))
             setOnClickListener {
-                val grid = ViewMode.toggle(requireContext())
-                setImageResource(if (grid) R.drawable.ic_list else R.drawable.ic_grid)
+                ViewMode.toggle(requireContext())
+                setImageResource(ViewMode.toggleIcon(requireContext()))
                 renderResultsForViewMode()
             }
         }
