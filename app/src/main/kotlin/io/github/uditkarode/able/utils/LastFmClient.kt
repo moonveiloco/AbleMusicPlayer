@@ -45,8 +45,14 @@ import java.util.concurrent.TimeUnit
 object LastFmClient {
     private const val TAG = "LastFmClient"
     private const val BASE = "https://ws.audioscrobbler.com/2.0/"
-    /** Cache entry lifetime in milliseconds. */
+    /** Cache TTL for volatile data (charts, search): 30 minutes. */
     private const val CACHE_TTL_MS = 30L * 60 * 1000
+
+    /** Cache TTL for artwork lookups (track/artist getInfo): 7 days. */
+    private const val ART_TTL_MS = 7L * 24 * 60 * 60 * 1000
+
+    /** Min interval between artwork lookups (rate limit is 5 req/s). */
+    private const val ART_MIN_INTERVAL_MS = 220L
 
     /** Last.fm artwork hashes for the generic gray-star placeholder. */
     private val PLACEHOLDER_HASHES = setOf(
@@ -54,11 +60,8 @@ object LastFmClient {
         "c6f59c1e5e7248a8c33aba0087ea49d0"  // artist placeholder
     )
 
-    /** Max artwork lookups done per list to stay under the 5 req/s limit. */
-    private const val ART_FALLBACK_BUDGET = 15
-
-    /** Delay between artwork fallback calls (5 req/s → 200+ ms). */
-    private const val ART_FALLBACK_DELAY_MS = 210L
+    /** Timestamp of the last getInfo request, for the global rate limiter. */
+    private var lastArtCallAt = 0L
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -108,6 +111,43 @@ object LastFmClient {
             .filter { it.isNotBlank() }
     }
 
+    /**
+     * Real artwork URL for a track, checked against the persistent cache
+     * first; resolves via `track.getInfo` (rate-limited) when needed.
+     * Blocks the calling thread — invoke from a background dispatcher.
+     */
+    fun resolveTrackImage(artist: String, track: String): String {
+        if (artist.isBlank() || track.isBlank()) return ""
+        ArtworkCache.trackImage(artist, track)?.let { return it }
+        rateLimitArt()
+        val url = trackInfoImage(artist, track)
+        if (url.isNotBlank()) ArtworkCache.putTrack(artist, track, url)
+        return url
+    }
+
+    /**
+     * Real artwork URL for an artist, persistent-cache aware and
+     * rate-limited. Blocks the calling thread — invoke from a background
+     * dispatcher.
+     */
+    fun resolveArtistImage(name: String): String {
+        if (name.isBlank()) return ""
+        ArtworkCache.artistImage(name)?.let { return it }
+        rateLimitArt()
+        val url = artistInfoImage(name)
+        if (url.isNotBlank()) ArtworkCache.putArtist(name, url)
+        return url
+    }
+
+    /** Global rate limiter: min [ART_MIN_INTERVAL_MS] between artwork lookups. */
+    private fun rateLimitArt() {
+        synchronized(this) {
+            val wait = ART_MIN_INTERVAL_MS - (System.currentTimeMillis() - lastArtCallAt)
+            if (wait > 0) try { Thread.sleep(wait) } catch (_: InterruptedException) {}
+            lastArtCallAt = System.currentTimeMillis()
+        }
+    }
+
     /** track.getInfo — richer metadata incl. the real album art. */
     private fun trackInfoImage(artist: String, track: String): String {
         val root = infoObject("track.getinfo", listOf("artist" to artist, "track" to track))
@@ -125,17 +165,18 @@ object LastFmClient {
         return if (isPlaceholderImage(best)) "" else best
     }
 
+    /** Last.fm sometimes returns a generic gray-star placeholder instead of art. */
+    fun isPlaceholderImage(url: String): Boolean =
+        PLACEHOLDER_HASHES.any { url.contains(it) }
+
     /** Fetches a getInfo response and returns the wrapped track/artist object. */
     private fun infoObject(method: String, params: List<Pair<String, String>>): JsonObject? {
-        val json = cachedJson(method, params) ?: return null
+        val json = cachedJson(method, params, ART_TTL_MS) ?: return null
         val root = try { JsonParser.parseString(json) } catch (_: Exception) { return null }
         if (!root.isJsonObject) return null
         val obj = root.asJsonObject
         return (obj.get("track") as? JsonObject) ?: (obj.get("artist") as? JsonObject)
     }
-
-    private fun isPlaceholderImage(url: String): Boolean =
-        PLACEHOLDER_HASHES.any { url.contains(it) }
 
     // region internals
 
@@ -170,7 +211,6 @@ object LastFmClient {
                 )
             }
             .filter { it.artist.isNotBlank() }
-            .enrichTrackArt()
     }
 
     private fun callArtists(method: String, vararg params: Pair<String, String>): List<ArtistSuggestion> {
@@ -186,42 +226,6 @@ object LastFmClient {
                     mbid = it.stringField("mbid") ?: ""
                 )
             }
-            .enrichArtistArt()
-    }
-
-    /**
-     * Last.fm often answers `track.search` / `chart.gettoptracks` with the
-     * generic gray-star placeholder instead of real artwork. Re-fetch the
-     * missing/placeholder images one by one via `track.getInfo`, which has
-     * the proper album art, respecting the 5 req/s rate limit.
-     */
-    private fun List<TrackSuggestion>.enrichTrackArt(): List<TrackSuggestion> {
-        var budget = ART_FALLBACK_BUDGET
-        for (suggestion in this) {
-            if (budget == 0) break
-            if (suggestion.image.isNotBlank() && !isPlaceholderImage(suggestion.image)) continue
-            if (suggestion.artist.isBlank() || suggestion.name.isBlank()) continue
-            budget--
-            try { Thread.sleep(ART_FALLBACK_DELAY_MS) } catch (_: InterruptedException) {}
-            val real = trackInfoImage(suggestion.artist, suggestion.name)
-            if (real.isNotBlank()) suggestion.image = real
-        }
-        return this
-    }
-
-    /** Same fallback for artists, via `artist.getInfo`. */
-    private fun List<ArtistSuggestion>.enrichArtistArt(): List<ArtistSuggestion> {
-        var budget = ART_FALLBACK_BUDGET
-        for (suggestion in this) {
-            if (budget == 0) break
-            if (suggestion.image.isNotBlank() && !isPlaceholderImage(suggestion.image)) continue
-            if (suggestion.name.isBlank()) continue
-            budget--
-            try { Thread.sleep(ART_FALLBACK_DELAY_MS) } catch (_: InterruptedException) {}
-            val real = artistInfoImage(suggestion.name)
-            if (real.isNotBlank()) suggestion.image = real
-        }
-        return this
     }
 
     /**
@@ -277,7 +281,11 @@ object LastFmClient {
         if (isJsonObject) asJsonObject else null
 
     /** Builds the request URL and caches the raw JSON body per (method, params). */
-    private fun cachedJson(method: String, params: List<Pair<String, String>>): String? {
+    private fun cachedJson(
+        method: String,
+        params: List<Pair<String, String>>,
+        ttlMs: Long = CACHE_TTL_MS
+    ): String? {
         if (!hasKey) {
             Log.w(TAG, "LASTFM_API_KEY is not set — discovery unavailable")
             return null
@@ -286,7 +294,7 @@ object LastFmClient {
 
         synchronized(cache) {
             val hit = cache[cacheKey]
-            if (hit != null && System.currentTimeMillis() - hit.second < CACHE_TTL_MS)
+            if (hit != null && System.currentTimeMillis() - hit.second < ttlMs)
                 return hit.first
         }
 

@@ -27,6 +27,17 @@
             app:layout_constraintTop_toTopOf="parent"
             app:riv_corner_radius="7dp" />
 
+        <ProgressBar
+            android:id="@+id/vid_art_progress"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:indeterminateTint="#94BCE3"
+            android:visibility="gone"
+            app:layout_constraintBottom_toBottomOf="@+id/vid_albart"
+            app:layout_constraintEnd_toEndOf="@+id/vid_albart"
+            app:layout_constraintStart_toStartOf="@+id/vid_albart"
+            app:layout_constraintTop_toTopOf="@+id/vid_albart" />
+
         <TextView
             android:id="@+id/vid_song"
             android:layout_width="0dp"
