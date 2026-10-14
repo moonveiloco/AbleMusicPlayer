@@ -1,11 +1,11 @@
-# CLAUDE.md
+# AGENTS.md
 
 ## Project Overview
 
 AbleMusicPlayer is an open-source Android music player that streams and downloads audio from YouTube/YouTube Music using NewPipeExtractor. It supports local file playback, streaming, cache-while-stream, and playlist management. Licensed under GPLv3.
 
 - **Package**: `io.github.uditkarode.able`
-- **Min SDK**: 23 (Android 6.0), **Target/Compile SDK**: 36
+- **Min SDK**: 24 (Android 7.0), **Target/Compile SDK**: 36
 - **Language**: 100% Kotlin (built-in via AGP 9, no separate kotlin-android plugin)
 - **Build**: Gradle 9.3.1, AGP 9.0.1, Kotlin 2.3.10, version catalog (`gradle/libs.versions.toml`)
 
@@ -96,10 +96,10 @@ Initialized once in `MainActivity.onCreate()` via `NewPipe.init(CustomDownloader
 
 | Library | Purpose |
 |---|---|
-| NewPipeExtractor v0.25.2 | YouTube search, stream URL extraction, playlist enumeration |
+| NewPipeExtractor v0.26.5 | YouTube search, stream URL extraction, playlist enumeration |
 | mobile-ffmpeg (local .aar) | Audio transcoding, metadata writing |
 | OkHttp 5.3.2 | HTTP client for NewPipe downloader and streaming |
-| Glide 4.16.0 | Image loading (album art, thumbnails) |
+| Glide 5.0.5 | Image loading (album art, thumbnails) |
 | Gson 2.13.2 | Playlist JSON serialization |
 | Lottie 6.7.1 | Loading animations |
 | Material Dialogs 3.3.0 | Dialogs and bottom sheets |
