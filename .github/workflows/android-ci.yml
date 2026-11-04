@@ -1,12 +1,24 @@
-# Builds the debug APKs (arm64-v8a + armeabi-v7a) on every push to master.
+# Unified CI/CD for AbleMusicPlayer, triggered on every push to master
+# (+ manual dispatch from the Actions tab).
 #
-# Repo prerequisites already satisfied:
-#   - gradlew + gradle-wrapper.jar are committed
-#   - app/src/main/libs/ffmpeg-kit.aar is committed (fileTree dependency)
+# Behaviour
+# ---------
+# - Debug APKs (arm64-v8a + armeabi-v7a) are ALWAYS built and uploaded as
+#   GitHub Actions artifacts. No secrets required: works on any fork/runner.
+# - Signed release APKs + a GitHub Release (tag build-<sha>) are produced ONLY
+#   when the signing secrets exist (TOKEN, STORE_PASS, KEY_PASS, KEY_ALIAS).
+#   Missing secrets skip the release steps instead of failing the run.
+# - Telegram notifications are sent only when TG_BOT_KEY is configured.
 #
-# Toolchain: AGP 9.0.1 requires JDK 17+ and Gradle 9.1+ (wrapper is 9.3.1).
-# The ubuntu-latest runner ships an Android SDK with licenses pre-accepted;
-# Gradle downloads the missing platform/build-tools for compileSdk 36 on its own.
+# Secrets policy
+# --------------
+# CI never embeds any API key in the APK:
+#   the Last.fm key is chosen by the user at runtime inside the app
+#   (ApiKeyProvider/LastFmKeyPrompt), and BuildConfig.LASTFM_API_KEY defaults
+#   to "" — so the published builds contain no keys. The old RapidAPI/Deezer
+#   build-time placeholder ("INSERT_RAPID_KEY") no longer exists in source.
+# Signing material (keystore, cloned privately via the TOKEN PAT) is only
+# used to sign and is never committed nor packed into the APK.
 
 name: Android Build
 
@@ -16,7 +28,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: android-build-${{ github.ref }}
@@ -24,34 +36,136 @@ concurrency:
 
 jobs:
   build:
-    name: assembleDebug
+    name: Build APKs
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      STORE_PASS: ${{ secrets.STORE_PASS }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASS: ${{ secrets.KEY_PASS }}
+      TOKEN: ${{ secrets.TOKEN }}
+      TG_BOT_KEY: ${{ secrets.TG_BOT_KEY }}
     steps:
+      # ---------- Setup ----------
+      # Repo prerequisites already satisfied:
+      #   - gradlew + gradle-wrapper.jar are committed
+      #   - app/src/main/libs/ffmpeg-kit.aar is committed (fileTree dependency)
+
       - name: Checkout
         uses: actions/checkout@v6
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
-      # Restores/saves the Gradle caches (~/.gradle) and validates the wrapper jar
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
+
+      # Nothing is echoed here: values are only tested for emptiness.
+      - name: Detect capabilities
+        id: caps
+        run: |
+          if [ -n "$TOKEN" ] && [ -n "$STORE_PASS" ] && [ -n "$KEY_PASS" ] && [ -n "$KEY_ALIAS" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$TG_BOT_KEY" ]; then
+            echo "telegram=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "telegram=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ---------- Debug build (always) ----------
 
       - name: Build debug APKs
         run: ./gradlew :app:assembleDebug --stacktrace
 
-      - name: List build outputs
-        run: ls -lh app/build/outputs/apk/debug/
-
-      - name: Upload APKs
+      - name: Upload debug APKs
         uses: actions/upload-artifact@v7
         with:
-          name: AbleMusicPlayer-debug-${{ github.sha }}
+          name: AbleMusic-debug-${{ github.sha }}
           if-no-files-found: error
           path: |
             app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
             app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
+
+      # ---------- Signed release (only with signing secrets) ----------
+
+      - name: Fetch signing keystore
+        if: steps.caps.outputs.signed == 'true'
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${TOKEN}@github.com/uditkarode/AbleMusicKeystore.git" \
+            _keystore
+          mv _keystore/release.keystore app/
+          rm -rf _keystore
+
+      - name: Build signed release APKs
+        if: steps.caps.outputs.signed == 'true'
+        run: ./gradlew :app:assembleRelease --configuration-cache --parallel
+
+      - name: Rename release APKs
+        if: steps.caps.outputs.signed == 'true'
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          cd app/build/outputs/apk/release
+          for APK in app-*.apk; do
+            ABI=$(basename "$APK" .apk | sed 's/^app-//' | sed 's/-release//' | sed 's/-unsigned//')
+            mv "$APK" "AbleMusic-${ABI}-${SHORT_SHA}.apk"
+          done
+          ls -lh ./*.apk
+
+      - name: Upload release APKs
+        if: steps.caps.outputs.signed == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: AbleMusic-release-${{ github.sha }}
+          if-no-files-found: error
+          path: app/build/outputs/apk/release/AbleMusic-*.apk
+
+      - name: Telegram — upload APKs
+        if: steps.caps.outputs.signed == 'true' && steps.caps.outputs.telegram == 'true'
+        continue-on-error: true
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          for APK in app/build/outputs/apk/release/AbleMusic-*.apk; do
+            ABI=$(basename "$APK" .apk | sed 's/AbleMusic-//' | sed "s/-${SHORT_SHA}//")
+            curl -sf -F document=@"${APK}" \
+              "https://api.telegram.org/bot${TG_BOT_KEY}/sendDocument" \
+              -F chat_id="-1001415196670" \
+              -F parse_mode=Markdown \
+              -F caption="\`${SHORT_SHA} — ${ABI}\`"
+          done
+
+      - name: Create GitHub Release
+        if: steps.caps.outputs.signed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          TAG="build-${SHORT_SHA}"
+          COMMIT_MSG=$(git log -1 --pretty=%s)
+          NOTES=$(printf 'Automated release from commit [`%s`](https://github.com/${{ github.repository }}/commit/%s)\n\n**%s**' \
+            "$SHORT_SHA" "$GITHUB_SHA" "$COMMIT_MSG")
+          gh release create "$TAG" \
+            --title "Build ${SHORT_SHA}" \
+            --notes "$NOTES" \
+            --latest \
+            app/build/outputs/apk/release/AbleMusic-*.apk
+
+      - name: Telegram — build finished
+        if: steps.caps.outputs.signed == 'true' && steps.caps.outputs.telegram == 'true'
+        continue-on-error: true
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          curl -sf -X POST "https://api.telegram.org/bot${TG_BOT_KEY}/sendMessage" \
+            -d chat_id="-1001415196670" \
+            -d disable_web_page_preview=true \
+            -d parse_mode=markdown \
+            -d text="🤖 \`workflow for\` [${SHORT_SHA}](https://github.com/${{ github.repository }}/commit/${GITHUB_SHA}) \`finished\` 🤖"
+          curl -sf -X POST "https://api.telegram.org/bot${TG_BOT_KEY}/sendSticker" \
+            -d chat_id="-1001415196670" \
+            -d sticker="CAACAgUAAxkBAAJc416cRVy18acXP6HgtZSnxuuoJi01AAK9AAMtO2YjehthhceJ__sYBA"
