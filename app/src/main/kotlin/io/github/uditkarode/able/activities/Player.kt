@@ -22,7 +22,6 @@ import android.content.ServiceConnection
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Rect
-import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -45,13 +44,10 @@ import androidx.core.graphics.drawable.toBitmap
 import androidx.palette.graphics.Palette
 import com.afollestad.materialdialogs.MaterialDialog
 import com.afollestad.materialdialogs.bottomsheets.BottomSheet
-import com.afollestad.materialdialogs.input.getInputField
 import com.afollestad.materialdialogs.input.getInputLayout
 import com.afollestad.materialdialogs.input.input
 import com.afollestad.materialdialogs.list.customListAdapter
 import com.afollestad.materialdialogs.list.listItems
-import com.arthenica.ffmpegkit.FFmpegKit
-import com.arthenica.ffmpegkit.ReturnCode
 import com.bumptech.glide.Glide
 import com.bumptech.glide.load.engine.DiskCacheStrategy
 import com.bumptech.glide.signature.ObjectKey
@@ -60,11 +56,14 @@ import com.makeramen.roundedimageview.RoundedImageView
 import io.github.inflationx.viewpump.ViewPumpContextWrapper
 import io.github.uditkarode.able.AbleApplication
 import io.github.uditkarode.able.R
+import io.github.uditkarode.able.adapters.DiscographyAdapter
+import io.github.uditkarode.able.adapters.DiscoverResultAdapter
 import io.github.uditkarode.able.adapters.SongAdapter
 import io.github.uditkarode.able.databinding.PlayerBinding
+import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import io.github.uditkarode.able.adapters.DiscoverResultAdapter
-import io.github.uditkarode.able.fragments.Home
+import io.github.uditkarode.able.model.Playlist
+import io.github.uditkarode.able.model.discovery.AlbumSuggestion
 import io.github.uditkarode.able.model.discovery.TrackSuggestion
 import io.github.uditkarode.able.model.song.Song
 import io.github.uditkarode.able.model.song.SongState
@@ -75,6 +74,8 @@ import io.github.uditkarode.able.utils.Constants
 import io.github.uditkarode.able.utils.DeezerClient
 import io.github.uditkarode.able.utils.LastFmClient
 import io.github.uditkarode.able.utils.LastFmKeyPrompt
+import io.github.uditkarode.able.utils.SimilarDiscovery
+import io.github.uditkarode.able.utils.SimilarSource
 import io.github.uditkarode.able.utils.MusicClientActivity
 import io.github.uditkarode.able.utils.Shared
 import io.github.uditkarode.able.utils.TrackResolver
@@ -82,6 +83,8 @@ import io.github.uditkarode.able.utils.ViewMode
 import androidx.activity.OnBackPressedCallback
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -196,165 +199,22 @@ class Player : MusicClientActivity() {
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {}
         })
 
-        binding.albumArt.setOnClickListener {
-            if (mService != null) {
-                val ms = mService as MusicService
-                if (ms.getPlayQueue()[ms.getCurrentIndex()].filePath.contains("emulated/0/"))
-                    MaterialDialog(this@Player).show {
-                        cornerRadius(20f)
-                        title(text = this@Player.getString(R.string.enter_song))
-                        input(this@Player.getString(R.string.song_ex)) { _, charSequence ->
-                            updateAlbumArt(charSequence.toString(), true)
-                        }
-                        getInputLayout().boxBackgroundColor = Color.parseColor("#000000")
-                    }
-            }
-        }
-
-        binding.albumArt.setOnLongClickListener {
-            if (mService != null) {
-                val ms = mService as MusicService
-                if (ms.getPlayQueue()[ms.getCurrentIndex()].filePath.contains("emulated/0/"))
-                    MaterialDialog(this@Player).show {
-                        cornerRadius(20f)
-                        title(text = this@Player.getString(R.string.enter_song))
-                        input(prefill = ms.getPlayQueue()[ms.getCurrentIndex()].name) { _, charSequence ->
-                            updateAlbumArt(charSequence.toString(), true)
-                        }
-                        getInputLayout().boxBackgroundColor = Color.parseColor("#000000")
-                    }
-            }
-            true
-        }
-
-        binding.songName.setOnClickListener {
-            if (mService != null) {
-                val mService = this.mService as MusicService
-                val current = mService.getPlayQueue()[mService.getCurrentIndex()]
-                if (current.filePath.contains("emulated/0/")) {
-                    MaterialDialog(this@Player).show {
-                        title(text = this@Player.getString(R.string.enter_new_song))
-                        input(this@Player.getString(R.string.song_ex2)) { _, charSequence ->
-                            val ext = current.filePath.run {
-                                this.substring(this.lastIndexOf(".") + 1)
-                            }
-                            val session = FFmpegKit.execute(
-                                "-i " +
-                                        "\"${current.filePath}\" -y -c copy " +
-                                        "-metadata title=\"$charSequence\" " +
-                                        "-metadata artist=\"${current.artist}\"" +
-                                        " \"${current.filePath}.new.$ext\""
-                            )
-                            when {
-                                ReturnCode.isSuccess(session.returnCode) -> {
-                                    File(current.filePath).delete()
-                                    File(current.filePath + ".new.$ext").renameTo(File(current.filePath))
-                                    if (current.isLocal) {
-                                        /* update media store for the song in question */
-                                        MediaScannerConnection.scanFile(this@Player,
-                                            arrayOf(current.filePath), null,
-                                            object :
-                                                MediaScannerConnection.MediaScannerConnectionClient {
-                                                override fun onMediaScannerConnected() {}
-
-                                                override fun onScanCompleted(
-                                                    path: String?,
-                                                    uri: Uri?
-                                                ) {
-                                                    changeMetadata(
-                                                        name = charSequence.toString(),
-                                                        artist = current.artist
-                                                    )
-                                                }
-                                            })
-                                    }
-                                }
-
-                                ReturnCode.isCancel(session.returnCode) -> {
-                                    Log.e(
-                                        "ERR>",
-                                        "Command execution cancelled by user."
-                                    )
-                                }
-
-                                else -> {
-                                    Log.e(
-                                        "ERR>",
-                                        "Command execution failed with rc=${session.returnCode}"
-                                    )
-                                }
-                            }
-                        }
-                        getInputField().setText(current.name)
-                        getInputLayout().boxBackgroundColor = Color.parseColor("#000000")
-                    }
-                }
-            }
-        }
-
         binding.artistName.setOnClickListener {
-            if (mService != null) {
-                val mService = this.mService as MusicService
-                val current = mService.getPlayQueue()[mService.getCurrentIndex()]
-                if (current.filePath.contains("emulated/0/")) {
-                    MaterialDialog(this@Player).show {
-                        title(text = this@Player.getString(R.string.enter_new_art))
-                        input(this@Player.getString(R.string.art_ex)) { _, charSequence ->
-                            val ext = current.filePath.run {
-                                this.substring(this.lastIndexOf(".") + 1)
-                            }
-                            val session = FFmpegKit.execute(
-                                "-i " +
-                                        "\"${current.filePath}\" -c copy " +
-                                        "-metadata title=\"${current.name}\" " +
-                                        "-metadata artist=\"$charSequence\"" +
-                                        " \"${current.filePath}.new.$ext\""
-                            )
-                            when {
-                                ReturnCode.isSuccess(session.returnCode) -> {
-                                    File(current.filePath).delete()
-                                    File(current.filePath + ".new.$ext").renameTo(File(current.filePath))
-                                    if (current.isLocal) {
-                                        /* update media store for the song in question */
-                                        MediaScannerConnection.scanFile(this@Player,
-                                            arrayOf(current.filePath), null,
-                                            object :
-                                                MediaScannerConnection.MediaScannerConnectionClient {
-                                                override fun onMediaScannerConnected() {}
+            val svc = mService ?: return@setOnClickListener
+            val current = svc.getPlayQueue().getOrNull(svc.getCurrentIndex()) ?: return@setOnClickListener
+            showArtistDiscography(current.artist)
+        }
 
-                                                override fun onScanCompleted(
-                                                    path: String?,
-                                                    uri: Uri?
-                                                ) {
-                                                    changeMetadata(
-                                                        name = current.name,
-                                                        artist = charSequence.toString()
-                                                    )
-                                                }
-                                            })
-                                    }
-                                }
+        binding.playerDownload.setOnClickListener {
+            val svc = mService ?: return@setOnClickListener
+            val current = svc.getPlayQueue().getOrNull(svc.getCurrentIndex()) ?: return@setOnClickListener
+            enqueueDownload(current)
+        }
 
-                                ReturnCode.isCancel(session.returnCode) -> {
-                                    Log.e(
-                                        "ERR>",
-                                        "Command execution cancelled by user."
-                                    )
-                                }
-
-                                else -> {
-                                    Log.e(
-                                        "ERR>",
-                                        "Command execution failed with rc=${session.returnCode}"
-                                    )
-                                }
-                            }
-                        }
-                        getInputField().setText(current.artist)
-                        getInputLayout().boxBackgroundColor = Color.parseColor("#000000")
-                    }
-                }
-            }
+        binding.playerSave.setOnClickListener {
+            val svc = mService ?: return@setOnClickListener
+            val current = svc.getPlayQueue().getOrNull(svc.getCurrentIndex()) ?: return@setOnClickListener
+            showAddToPlaylistSheet(current)
         }
 
         (binding.shuffleButton.parent as View).post {
@@ -603,14 +463,15 @@ class Player : MusicClientActivity() {
         }
     }
 
-    private fun updateAlbumArt(customSongName: String? = null, forceWeb: Boolean = false) {
+    private fun updateAlbumArt() {
         if (mService == null) return
         val mService = mService as MusicService
 
         binding.imgAlbart.visibility = View.GONE
         binding.notePh.visibility = View.VISIBLE
         var didGetArt = false
-        val current = mService.getPlayQueue()[mService.getCurrentIndex()]
+        val current = mService.getPlayQueue().getOrNull(mService.getCurrentIndex())
+            ?: return
 
         // Cover stored beside downloaded files. Only meaningful for real
         // downloaded files: streamed/unknown paths ("", "<id>.stream.tmp")
@@ -645,7 +506,7 @@ class Player : MusicClientActivity() {
             */
 
             /* (1) Check albumart in song metadata (if the song is a local song) */
-            if (current.isLocal && !forceWeb) {
+            if (current.isLocal) {
                 Log.i("INFO>", "Fetching from metadata")
                 try {
                     val sArtworkUri =
@@ -667,7 +528,7 @@ class Player : MusicClientActivity() {
             }
 
             /* (2) Cover files saved by the app */
-            if (!didGetArt && !forceWeb) {
+            if (!didGetArt) {
                 val imgToLoad = img?.takeIf { it.exists() }
                     ?: cacheImg?.takeIf { it.exists() }
                 if (imgToLoad != null) {
@@ -689,7 +550,7 @@ class Player : MusicClientActivity() {
 
             /* (3) Last.fm — exact artist+track identity, cached */
             var albumName: String? = null
-            val webTitle = customSongName ?: current.name
+            val webTitle = current.name
             if (!didGetArt &&
                 Shared.isInternetConnected(this@Player) &&
                 current.artist.isNotBlank() && webTitle.isNotBlank()
@@ -742,17 +603,6 @@ class Player : MusicClientActivity() {
                 }
             }
 
-            /* Metadata-edit flow: persist the fetched cover into the song */
-            if (didGetArt && forceWeb && isDownloaded) {
-                img?.let { file ->
-                    Shared.getSharedBitmap()?.let { Shared.saveAlbumArtToDisk(it, file) }
-                    Shared.addThumbnails(current.filePath, albumName ?: "", this@Player)
-                }
-                launch(Dispatchers.Main) {
-                    Home.songAdapter?.notifyItemChanged(mService.getCurrentIndex())
-                }
-            }
-
             if (!didGetArt) {
                 launch(Dispatchers.Main) {
                     binding.imgAlbart.visibility = View.GONE
@@ -793,44 +643,16 @@ class Player : MusicClientActivity() {
         }
     }
 
-    private fun changeMetadata(name: String, artist: String) {
-        if (mService != null) {
-            val mService = mService as MusicService
-            launch(Dispatchers.Main) {
-                binding.songName.text = name
-                binding.artistName.text = artist
-            }
-
-            if (mService.getMediaPlayer().isPlaying) {
-                mService.showNotification(
-                    mService.generateAction(
-                        R.drawable.notif_pause,
-                        getString(R.string.pause),
-                        "ACTION_PAUSE"
-                    ), nameOverride = name, artistOverride = artist
-                )
-            } else {
-                mService.showNotification(
-                    mService.generateAction(
-                        R.drawable.notif_play,
-                        getString(R.string.play),
-                        "ACTION_PLAY"
-                    ), nameOverride = name, artistOverride = artist
-                )
-            }
-
-            // TODO MusicService.registeredClients.forEach { it.queueChanged() }
-        }
-    }
-
     private fun songChangeEvent() {
         if (mService != null) {
             val mService = mService as MusicService
             updateAlbumArt()
 
-            val song = mService.getPlayQueue()[mService.getCurrentIndex()]
+            val song = mService.getPlayQueue().getOrNull(mService.getCurrentIndex())
+                ?: return
             binding.songName.text = song.name
             binding.artistName.text = song.artist
+            updateDownloadButtonState(song)
 
             val duration = mService.getMediaPlayer().duration
             if (duration > 0) {
@@ -847,6 +669,43 @@ class Player : MusicClientActivity() {
         }
     }
 
+    /**
+     * Download affordance state for the current song: grey and disabled when
+     * the song is already in the local library (matched by the rename-proof
+     * video ID, or being a device-local file), white and active otherwise.
+     */
+    private fun updateDownloadButtonState(song: Song) {
+        val videoId = Shared.getIdFromLink(song.youtubeLink)
+
+        fun apply(inLibrary: Boolean) {
+            binding.playerDownload.isEnabled = !inLibrary
+            binding.playerDownload.setColorFilter(
+                if (inLibrary) 0x40fbfbfb else 0xffffffff.toInt()
+            )
+        }
+
+        if ((song.isLocal && song.filePath.isNotBlank()) || Shared.isInLibrary(videoId)) {
+            apply(true)
+            return
+        }
+        apply(false)
+
+        // Cold-start safety: the library registry may not have been built yet
+        // (Home never scanned). Build it on IO, then re-evaluate for the song
+        // still on screen.
+        if (videoId.isNotBlank() && !Shared.localIdsFresh) {
+            launch(Dispatchers.IO) {
+                Shared.refreshLocalIds()
+                launch(Dispatchers.Main) {
+                    val svc = mService ?: return@launch
+                    val current = svc.getPlayQueue().getOrNull(svc.getCurrentIndex())
+                    if (current != null && Shared.getIdFromLink(current.youtubeLink) == videoId)
+                        apply(Shared.isInLibrary(videoId))
+                }
+            }
+        }
+    }
+
     private fun getDurationFromMs(durtn: Int): String {
         val duration = durtn.toLong()
         val seconds = (TimeUnit.MILLISECONDS.toSeconds(duration) -
@@ -859,6 +718,32 @@ class Player : MusicClientActivity() {
         return ret + seconds
     }
 
+    /**
+     * Shows the centered loading spinner over a full-screen scrim that dims
+     * the whole player and swallows touches, so a double-tap can't queue
+     * overlapping bottom sheets while the network call is in flight.
+     */
+    private fun showLoading() {
+        binding.loadingScrim.visibility = View.VISIBLE
+        binding.loadingOverlay.visibility = View.VISIBLE
+        binding.playerSave.isEnabled = false
+        binding.playerDiscover.isEnabled = false
+        binding.playerDownload.isEnabled = false
+    }
+
+    /** Hides the scrim/spinner and restores the real control states; the
+     *  download button's enabled state depends on the library registry, so
+     *  it is re-derived for the song currently on screen. */
+    private fun hideLoading() {
+        binding.loadingScrim.visibility = View.GONE
+        binding.loadingOverlay.visibility = View.GONE
+        binding.playerSave.isEnabled = true
+        binding.playerDiscover.isEnabled = true
+        val svc = mService ?: return
+        svc.getPlayQueue().getOrNull(svc.getCurrentIndex())
+            ?.let { updateDownloadButtonState(it) }
+    }
+
     override fun attachBaseContext(newBase: Context?) {
         super.attachBaseContext(ViewPumpContextWrapper.wrap(newBase!!, AbleApplication.viewPump))
     }
@@ -867,12 +752,16 @@ class Player : MusicClientActivity() {
         super.onResume()
         if (mService == null)
             bindEvent()
-        else
+        else {
             playPauseEvent(
                 if ((mService as MusicService)
                         .getMediaPlayer().isPlaying
                 ) SongState.playing else SongState.paused
             )
+            val svc = mService as MusicService
+            svc.getPlayQueue().getOrNull(svc.getCurrentIndex())
+                ?.let { updateDownloadButtonState(it) }
+        }
     }
 
     override fun onDestroy() {
@@ -957,18 +846,25 @@ class Player : MusicClientActivity() {
             LastFmKeyPrompt.showIfMissing(this)
             return
         }
+        showLoading()
         launch(Dispatchers.IO) {
-            val tracks = try {
-                LastFmClient.similarTracks(current.artist, current.name)
+            val discovery = try {
+                LastFmClient.similarTracksSmart(current.artist, current.name)
             } catch (e: Exception) {
-                Log.e("Player", "Similar tracks failed", e); emptyList()
+                Log.e("Player", "Similar tracks failed", e)
+                SimilarDiscovery(emptyList(), SimilarSource.NONE)
             }
+            Log.i(
+                "ABLE>",
+                "discovery '${current.name}': source=${discovery.source} rows=${discovery.tracks.size}"
+            )
             launch(Dispatchers.Main) {
-                if (tracks.isEmpty()) {
+                hideLoading()
+                if (discovery.tracks.isEmpty()) {
                     Toast.makeText(this@Player, R.string.disc_no_suggestions, Toast.LENGTH_SHORT).show()
                     return@launch
                 }
-                showSimilarSheet(tracks)
+                showSimilarSheet(discovery, current.artist)
             }
         }
     }
@@ -979,12 +875,21 @@ class Player : MusicClientActivity() {
      * full-screen MaterialDialog list. Opens collapsed at ~45% of the screen
      * and can be dragged to full height.
      */
-    private fun showSimilarSheet(tracks: List<TrackSuggestion>) {
+    private fun showSimilarSheet(discovery: SimilarDiscovery, artistName: String) {
         val sheet = BottomSheetDialog(this)
         val content = layoutInflater.inflate(R.layout.sheet_similar, null)
         sheet.setContentView(content)
         sheet.behavior.peekHeight =
             (resources.displayMetrics.heightPixels * 0.45f).toInt()
+        // The title tells where the suggestions came from: exact/canonicalized
+        // similarity, related artists, the seed artist itself or Deezer radio.
+        content.findViewById<TextView>(R.id.sheet_title).text = when (discovery.source) {
+            SimilarSource.ARTIST_MIX, SimilarSource.DEEZER_RADIO ->
+                getString(R.string.disc_inspired_by, artistName)
+            SimilarSource.ARTIST_TOP ->
+                getString(R.string.disc_more_from, artistName)
+            else -> getString(R.string.disc_similar)
+        }
         val rv = content.findViewById<RecyclerView>(R.id.sheet_rv)
         val toggle = content.findViewById<ImageView>(R.id.sheet_view_mode)
 
@@ -992,11 +897,15 @@ class Player : MusicClientActivity() {
             toggle.setImageResource(ViewMode.toggleIcon(this))
             rv.layoutManager = ViewMode.layoutManagerFor(this)
             rv.adapter = DiscoverResultAdapter(
-                ArrayList<Any>(tracks),
+                ArrayList<Any>(discovery.tracks),
                 onTrackPressed = { suggestion ->
                     showTrackActionMenu(suggestion)
                 },
-                onArtistPressed = { }
+                onArtistPressed = { artist ->
+                    // Don't stack a second bottom sheet over this one.
+                    sheet.dismiss()
+                    showArtistDiscography(artist.name)
+                }
             )
         }
         render()
@@ -1005,6 +914,174 @@ class Player : MusicClientActivity() {
             render()
         }
         sheet.show()
+    }
+
+    /**
+     * Artist drill-down for the currently playing song: the same discography
+     * experience as the Search tab (albums newest-first, collapsible, then
+     * leftover top tracks as singles), presented as a bottom sheet.
+     */
+    private fun showArtistDiscography(artistName: String) {
+        if (artistName.isBlank()) {
+            Toast.makeText(this, R.string.disc_unknown_artist, Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!ApiKeyProvider.hasLastFmKey) {
+            LastFmKeyPrompt.showIfMissing(this)
+            return
+        }
+        showLoading()
+        launch(Dispatchers.IO) {
+            coroutineScope {
+                // Artist photo (artist.getinfo) runs next to the discography
+                // fetches so it doesn't add latency to the sheet.
+                val imageDeferred = async {
+                    try { LastFmClient.resolveArtistImage(artistName) }
+                    catch (e: Exception) { Log.e("Player", "Artist image failed", e); "" }
+                }
+                val albums = try { LastFmClient.artistTopAlbums(artistName) }
+                    catch (e: Exception) { Log.e("Player", "Top albums failed", e); emptyList<AlbumSuggestion>() }
+                val loaded = albums.mapNotNull { album ->
+                    try { LastFmClient.albumTracks(artistName, album.name, album.image) }
+                    catch (e: Exception) { Log.e("Player", "Album tracks failed for ${album.name}", e); null }
+                }
+                val albumTrackNames = loaded.flatMap { it.tracks }
+                    .map { it.name.lowercase() }
+                    .toSet()
+                val singles = try { LastFmClient.artistTopTracks(artistName) }
+                    catch (e: Exception) { emptyList<TrackSuggestion>() }
+                    .filter { it.name.lowercase() !in albumTrackNames }
+                // Albums first, newest first; undated albums last (popularity order).
+                val ordered = loaded.sortedWith(
+                    compareByDescending<AlbumSuggestion> { it.year != 0 }
+                        .thenByDescending { it.year }
+                )
+                val artistImage = imageDeferred.await()
+                launch(Dispatchers.Main) {
+                    hideLoading()
+                    if (ordered.isEmpty() && singles.isEmpty()) {
+                        Toast.makeText(this@Player, R.string.disc_no_discography, Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                    showDiscographySheet(artistName, artistImage, ordered, singles)
+                }
+            }
+        }
+    }
+
+    /** Bottom sheet hosting the artist header (photo + name, rendered by
+     *  the adapter) and the discography list; track taps reuse the
+     *  suggestion action menu (play now / add to queue / download). */
+    private fun showDiscographySheet(
+        artistName: String,
+        artistImage: String,
+        albums: List<AlbumSuggestion>,
+        singles: List<TrackSuggestion>
+    ) {
+        val sheet = BottomSheetDialog(this)
+        val content = layoutInflater.inflate(R.layout.sheet_discography, null)
+        sheet.setContentView(content)
+        sheet.behavior.peekHeight =
+            (resources.displayMetrics.heightPixels * 0.55f).toInt()
+        val rv = content.findViewById<RecyclerView>(R.id.sheet_rv)
+        rv.layoutManager = LinearLayoutManager(this)
+        rv.adapter = DiscographyAdapter(artistName, artistImage, albums, singles) { suggestion ->
+            showTrackActionMenu(suggestion)
+        }
+        sheet.show()
+    }
+
+    /**
+     * Save the current song into one of the user's playlists: a bottom sheet
+     * listing the playlists with a trailing "+" row that creates a new one
+     * on the fly (the only row when no playlist exists yet). Saving stores
+     * the song reference (name, artist, link, artwork) — never a download.
+     */
+    private fun showAddToPlaylistSheet(song: Song) {
+        val sheet = BottomSheetDialog(this)
+        val content = layoutInflater.inflate(R.layout.sheet_add_to_playlist, null)
+        sheet.setContentView(content)
+        sheet.behavior.peekHeight =
+            (resources.displayMetrics.heightPixels * 0.55f).toInt()
+        val rv = content.findViewById<RecyclerView>(R.id.sheet_rv)
+
+        fun render() {
+            rv.layoutManager = LinearLayoutManager(this)
+            rv.adapter = PlaylistPickerAdapter(
+                Shared.getPlaylists(),
+                onPick = { playlist ->
+                    Shared.addToPlaylist(playlist, song, this)
+                    Toast.makeText(
+                        this,
+                        getString(R.string.playlist_added, playlist.name.replace(".json", "")),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    sheet.dismiss()
+                },
+                onCreate = {
+                    MaterialDialog(this).show {
+                        title(text = this@Player.getString(R.string.playlist_namei))
+                        input(this@Player.getString(R.string.name_s)) { _, charSequence ->
+                            val name = charSequence.toString().trim()
+                            if (name.isBlank()) return@input
+                            // createPlaylist overwrites; only create when new.
+                            if (!Shared.playlistExists("$name.json"))
+                                Shared.createPlaylist(name, this@Player)
+                            Shared.getPlaylists().firstOrNull { it.name == "$name.json" }
+                                ?.let { playlist ->
+                                    Shared.addToPlaylist(playlist, song, this@Player)
+                                    Toast.makeText(
+                                        this@Player,
+                                        getString(R.string.playlist_added, name),
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            render() // sheet stays open with the updated list
+                        }
+                        getInputLayout().boxBackgroundColor = Color.parseColor("#000000")
+                    }
+                }
+            )
+        }
+        render()
+        sheet.show()
+    }
+
+    /**
+     * Rows of the add-to-playlist sheet: one entry per user playlist, then a
+     * final "+" row to create a new playlist. With no playlists at all, the
+     * "+" row is the only content.
+     */
+    private inner class PlaylistPickerAdapter(
+        private val playlists: List<Playlist>,
+        private val onPick: (Playlist) -> Unit,
+        private val onCreate: () -> Unit
+    ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+
+        private val typePlaylist = 0
+        private val typeCreate = 1
+
+        override fun getItemCount(): Int = playlists.size + 1
+
+        override fun getItemViewType(position: Int): Int =
+            if (position < playlists.size) typePlaylist else typeCreate
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+            val view = layoutInflater.inflate(R.layout.row_playlist_picker, parent, false)
+            return object : RecyclerView.ViewHolder(view) {}
+        }
+
+        override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+            val creating = getItemViewType(position) == typeCreate
+            holder.itemView.findViewById<ImageView>(R.id.row_icon)
+                .setImageResource(if (creating) R.drawable.ic_add else R.drawable.pl_playlist)
+            holder.itemView.findViewById<TextView>(R.id.row_text).text =
+                if (creating) getString(R.string.crp)
+                else playlists[position].name.replace(".json", "")
+            holder.itemView.setOnClickListener {
+                if (creating) onCreate() else onPick(playlists[position])
+            }
+        }
     }
 
     /** Choice menu for a tapped suggestion: play now / add to queue / download. */
@@ -1053,6 +1130,12 @@ class Player : MusicClientActivity() {
 
     /** Adds a resolved song to the DownloadService queue (same flow as MainActivity). */
     private fun enqueueDownload(song: Song) {
+        if ((song.isLocal && song.filePath.isNotBlank()) ||
+            Shared.isInLibrary(Shared.getIdFromLink(song.youtubeLink))
+        ) {
+            Toast.makeText(this, R.string.dl_already_library, Toast.LENGTH_SHORT).show()
+            return
+        }
         if (DownloadService.isAlreadyQueued(song.youtubeLink)) {
             Toast.makeText(this, R.string.disc_dl_already, Toast.LENGTH_SHORT).show()
             return

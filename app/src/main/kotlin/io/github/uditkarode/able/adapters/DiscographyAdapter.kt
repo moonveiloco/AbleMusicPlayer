@@ -30,19 +30,30 @@ import com.bumptech.glide.load.engine.DiskCacheStrategy
 import io.github.uditkarode.able.R
 import io.github.uditkarode.able.model.discovery.AlbumSuggestion
 import io.github.uditkarode.able.model.discovery.TrackSuggestion
+import io.github.uditkarode.able.utils.DeezerClient
 import io.github.uditkarode.able.utils.LastFmClient
+import io.github.uditkarode.able.utils.LazyArtLoader
 
 /**
- * Renders an artist's discography: collapsed album headers (art + title +
- * year + track count, tap to expand/collapse the tracks inline, newest
- * first) followed by a "Singles" section with the leftover top tracks.
- * Always a vertical list — section headers would be confusing in a grid.
+ * Renders an artist's discography: a hero header (artist photo with the
+ * name overlaid over a darkening gradient), then collapsed album headers
+ * (art + title + year + track count, tap to expand/collapse the tracks
+ * inline, newest first) followed by a "Singles" section with the leftover
+ * top tracks. Always a vertical list — section headers would be confusing
+ * in a grid.
  */
 class DiscographyAdapter(
+    private val artistName: String,
+    private val artistImage: String,
     private val albums: List<AlbumSuggestion>,
     private val singles: List<TrackSuggestion>,
     private val onTrackPressed: (TrackSuggestion) -> Unit
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+
+    /** Resolves placeholder/missing art in the background — Last.fm answers
+     *  many discography queries with its gray placeholder, and showing
+     *  default art forever is not an answer (see [LazyArtLoader]). */
+    private val artLoader = LazyArtLoader()
 
     /** Album names currently expanded inline. */
     private val expanded = HashSet<String>()
@@ -55,17 +66,20 @@ class DiscographyAdapter(
     }
 
     companion object {
-        private const val TYPE_ALBUM = 0
-        private const val TYPE_TRACK = 1
-        private const val TYPE_SINGLES_HEADER = 2
+        private const val TYPE_ARTIST_HEADER = 0
+        private const val TYPE_ALBUM = 1
+        private const val TYPE_TRACK = 2
+        private const val TYPE_SINGLES_HEADER = 3
 
-        /** Sentinel row: the "Singles" section header. Companion-scoped so
-         *  it is initialized before any instance `init` block uses it. */
+        /** Sentinel rows. Companion-scoped so they are initialized before
+         *  any instance `init` block uses them. */
+        private val ARTIST_MARKER = Any()
         private val SINGLES_MARKER = Any()
     }
 
     private fun rebuild() {
         rows.clear()
+        rows.add(ARTIST_MARKER)
         for (album in albums) {
             rows.add(album)
             if (album.name in expanded) rows.addAll(album.tracks)
@@ -77,6 +91,7 @@ class DiscographyAdapter(
     }
 
     override fun getItemViewType(position: Int): Int = when {
+        rows[position] === ARTIST_MARKER -> TYPE_ARTIST_HEADER
         rows[position] === SINGLES_MARKER -> TYPE_SINGLES_HEADER
         rows[position] is AlbumSuggestion -> TYPE_ALBUM
         else -> TYPE_TRACK
@@ -85,6 +100,8 @@ class DiscographyAdapter(
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         val inflater = LayoutInflater.from(parent.context)
         return when (viewType) {
+            TYPE_ARTIST_HEADER ->
+                ArtistVH(inflater.inflate(R.layout.rv_artist_header, parent, false))
             TYPE_ALBUM -> AlbumVH(inflater.inflate(R.layout.rv_album_header, parent, false))
             TYPE_SINGLES_HEADER ->
                 SinglesVH(inflater.inflate(R.layout.rv_section_header, parent, false))
@@ -98,6 +115,25 @@ class DiscographyAdapter(
         val context = holderRaw.itemView.context
         holderRaw.itemView.tag = position
         when (val item = rows[position]) {
+            ARTIST_MARKER -> {
+                val holder = holderRaw as ArtistVH
+                holder.name.text = artistName
+                holder.name.typeface =
+                    Typeface.createFromAsset(context.assets, "fonts/interbold.otf")
+                if (artistImage.isNotBlank() && !LastFmClient.isPlaceholderImage(artistImage)) {
+                    holder.image.visibility = View.VISIBLE
+                    holder.scrim.visibility = View.VISIBLE
+                    Glide.with(context)
+                        .load(artistImage)
+                        .centerCrop()
+                        .diskCacheStrategy(DiskCacheStrategy.ALL)
+                        .into(holder.image)
+                } else {
+                    holder.image.visibility = View.GONE
+                    holder.scrim.visibility = View.GONE
+                }
+            }
+
             is AlbumSuggestion -> {
                 val holder = holderRaw as AlbumVH
                 holder.name.text = item.name
@@ -125,8 +161,21 @@ class DiscographyAdapter(
                         .diskCacheStrategy(DiskCacheStrategy.ALL)
                         .into(holder.art)
                 } else {
-                    holder.artProgress.visibility = View.GONE
-                    holder.art.setImageResource(R.drawable.def_albart)
+                    // Placeholder/blank: resolve the real cover from Deezer
+                    // (the Player's hi-res path). The winner also feeds the
+                    // album's track rows, which carry the same Last.fm image.
+                    artLoader.load(
+                        holder.itemView, holder.art, holder.artProgress, position,
+                        "al:${item.artist}|${item.name}", item.image,
+                        resolve = { DeezerClient.albumCover(item.artist, item.name) },
+                        onResult = { url ->
+                            item.image = url
+                            item.tracks.forEach { track ->
+                                if (track.image.isBlank() || LastFmClient.isPlaceholderImage(track.image))
+                                    track.image = url
+                            }
+                        }
+                    )
                 }
             }
 
@@ -146,11 +195,23 @@ class DiscographyAdapter(
                         .diskCacheStrategy(DiskCacheStrategy.ALL)
                         .into(holder.songAlbumArt)
                 } else {
-                    holder.artProgress.visibility = View.GONE
-                    holder.songAlbumArt.setImageResource(R.drawable.def_albart)
+                    // Same resolution path as the search list: persistent
+                    // ArtworkCache, rate-limit aware.
+                    artLoader.load(
+                        holder.itemView, holder.songAlbumArt, holder.artProgress, position,
+                        "t:${item.artist}|${item.name}", item.image,
+                        resolve = { LastFmClient.resolveTrackImage(item.artist, item.name) },
+                        onResult = { item.image = it }
+                    )
                 }
             }
         }
+    }
+
+    class ArtistVH(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        val image: ImageView = itemView.findViewById(R.id.artist_header_image)
+        val scrim: View = itemView.findViewById(R.id.artist_header_scrim)
+        val name: TextView = itemView.findViewById(R.id.artist_header_name)
     }
 
     class AlbumVH(itemView: View) : RecyclerView.ViewHolder(itemView) {
