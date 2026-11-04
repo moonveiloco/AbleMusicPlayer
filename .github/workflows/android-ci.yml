@@ -6,7 +6,8 @@
 # - Debug APKs (arm64-v8a + armeabi-v7a) are ALWAYS built and uploaded as
 #   GitHub Actions artifacts. No secrets required: works on any fork/runner.
 # - Signed release APKs + a GitHub Release (tag build-<sha>) are produced ONLY
-#   when the signing secrets exist (TOKEN, STORE_PASS, KEY_PASS, KEY_ALIAS).
+#   when the signing secrets exist (KEYSTORE_BASE64, STORE_PASS, KEY_PASS,
+#   KEY_ALIAS).
 #   Missing secrets skip the release steps instead of failing the run.
 # - Telegram notifications are sent only when TG_BOT_KEY is configured.
 #
@@ -17,8 +18,11 @@
 #   (ApiKeyProvider/LastFmKeyPrompt), and BuildConfig.LASTFM_API_KEY defaults
 #   to "" — so the published builds contain no keys. The old RapidAPI/Deezer
 #   build-time placeholder ("INSERT_RAPID_KEY") no longer exists in source.
-# Signing material (keystore, cloned privately via the TOKEN PAT) is only
-# used to sign and is never committed nor packed into the APK.
+# Signing material: the keystore arrives base64-encoded in the KEYSTORE_BASE64
+# secret (decoded in the CI workspace only) and is never committed nor packed
+# into the APK — only its signature is applied. Keep the keystore file and
+# passwords backed up outside the repo: losing them means updates can no
+# longer be installed over the existing app.
 
 name: Android Build
 
@@ -43,7 +47,7 @@ jobs:
       STORE_PASS: ${{ secrets.STORE_PASS }}
       KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
       KEY_PASS: ${{ secrets.KEY_PASS }}
-      TOKEN: ${{ secrets.TOKEN }}
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       TG_BOT_KEY: ${{ secrets.TG_BOT_KEY }}
     steps:
       # ---------- Setup ----------
@@ -67,7 +71,7 @@ jobs:
       - name: Detect capabilities
         id: caps
         run: |
-          if [ -n "$TOKEN" ] && [ -n "$STORE_PASS" ] && [ -n "$KEY_PASS" ] && [ -n "$KEY_ALIAS" ]; then
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$STORE_PASS" ] && [ -n "$KEY_PASS" ] && [ -n "$KEY_ALIAS" ]; then
             echo "signed=true" >> "$GITHUB_OUTPUT"
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"
@@ -94,14 +98,9 @@ jobs:
 
       # ---------- Signed release (only with signing secrets) ----------
 
-      - name: Fetch signing keystore
+      - name: Restore signing keystore
         if: steps.caps.outputs.signed == 'true'
-        run: |
-          git clone --depth 1 \
-            "https://x-access-token:${TOKEN}@github.com/uditkarode/AbleMusicKeystore.git" \
-            _keystore
-          mv _keystore/release.keystore app/
-          rm -rf _keystore
+        run: echo "$KEYSTORE_BASE64" | base64 --decode > app/release.keystore
 
       - name: Build signed release APKs
         if: steps.caps.outputs.signed == 'true'
