@@ -1,0 +1,57 @@
+# Builds the debug APKs (arm64-v8a + armeabi-v7a) on every push to master.
+#
+# Repo prerequisites already satisfied:
+#   - gradlew + gradle-wrapper.jar are committed
+#   - app/src/main/libs/ffmpeg-kit.aar is committed (fileTree dependency)
+#
+# Toolchain: AGP 9.0.1 requires JDK 17+ and Gradle 9.1+ (wrapper is 9.3.1).
+# The ubuntu-latest runner ships an Android SDK with licenses pre-accepted;
+# Gradle downloads the missing platform/build-tools for compileSdk 36 on its own.
+
+name: Android Build
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: assembleDebug
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # Restores/saves the Gradle caches (~/.gradle) and validates the wrapper jar
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build debug APKs
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: List build outputs
+        run: ls -lh app/build/outputs/apk/debug/
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v7
+        with:
+          name: AbleMusicPlayer-debug-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
+            app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
