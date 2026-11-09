@@ -48,14 +48,20 @@ import android.util.Log
 import android.widget.Toast
 import com.bumptech.glide.Glide
 import com.bumptech.glide.signature.ObjectKey
+import androidx.preference.PreferenceManager
 import io.github.uditkarode.able.R
 import io.github.uditkarode.able.activities.Player
+import io.github.uditkarode.able.model.discovery.TrackSuggestion
 import io.github.uditkarode.able.model.song.Song
+import io.github.uditkarode.able.model.song.SongSource
 import io.github.uditkarode.able.model.song.SongState
 import io.github.uditkarode.able.utils.ChunkedDownloader
 import io.github.uditkarode.able.utils.Constants
+import io.github.uditkarode.able.utils.LastFmClient
 import io.github.uditkarode.able.utils.Shared
+import io.github.uditkarode.able.utils.SimilarSource
 import io.github.uditkarode.able.utils.StreamProxy
+import io.github.uditkarode.able.utils.TrackResolver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -139,6 +145,27 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
         /** Songs whose stream resolution+download is already running — dedup
          *  between the current song and the prefetch of the next one. */
         private val activeDownloads = java.util.Collections.synchronizedSet(HashSet<Int>())
+
+        /* ===== Discover radio: autoplay once the user queue runs out ===== */
+
+        /** Suggestions one seed produces at most. */
+        private const val RADIO_BATCH_SIZE = 10
+
+        /** Settings switch "Radio Discover a fine coda" (default ON). */
+        private const val PREF_RADIO_AUTOPLAY = "radio_autoplay"
+
+        /** One seed at a time — set from IO and Main, hence atomic. */
+        private val radioSeedInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        /** A queue-end completion landed while the seed was still resolving:
+         *  the append resumes the handoff instead of the completion stalling
+         *  the Main thread waiting for network work. */
+        @Volatile private var pendingRadioHandoff = false
+
+        /** Bumped when the user queue is replaced (setQueue): seed work that
+         *  captured an older generation throws its results away instead of
+         *  appending them to the fresh queue. */
+        @Volatile private var radioGeneration = 0
 
         /**
          * The single playback handoff channel for every client: waits for the
@@ -368,10 +395,7 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
             }
 
             action.equals("ACTION_KILL", ignoreCase = true) -> {
-                cleanUp()
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                stopForGood()
             }
         }
     }
@@ -390,6 +414,9 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
      * @param queue an ArrayList of Song objects to be set as the new queue.
      */
     fun setQueue(queue: ArrayList<Song>) {
+        // A fresh user queue replaces any appended Discover batch wholesale:
+        // drop the radio state and invalidate in-flight seeds.
+        resetRadioState()
         playQueue = queue
         Log.i("ABLE>", "setQueue ${queue.size} songs, first='${queue.firstOrNull()?.name}'")
         launch(Dispatchers.Default) {
@@ -431,9 +458,7 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
         currentIndex = index
         Log.i("ABLE>", "setIndex $index '${playQueue.getOrNull(index)?.name ?: "?"}'")
         songChanged()
-        launch(Dispatchers.Default) {
-            registeredClients.forEach { it.indexChanged(currentIndex) }
-        }
+        notifyIndexChanged()
     }
 
     /**
@@ -489,9 +514,7 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
             registeredClients.forEach { it.queueChanged(playQueue) }
         }
 
-        launch(Dispatchers.Default) {
-            registeredClients.forEach { it.indexChanged(currentIndex) }
-        }
+        notifyIndexChanged()
     }
 
     /**
@@ -505,6 +528,7 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
             if (currentIndex == 0) currentIndex = playQueue.size - 1
             else currentIndex--
             songChanged()
+            notifyIndexChanged()
         }
     }
 
@@ -527,20 +551,231 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
         if (currentIndex + 1 < playQueue.size) {
             currentIndex++
             songChanged()
+            notifyIndexChanged()
         } else {
-            currentIndex = 0
-            songChanged()
+            handleQueueEnd()
         }
+    }
+
+    /* ===== Discover radio: autoplay once the user queue runs out ===== */
+
+    /**
+     * The user queue ran out. The old "restart from the top of the queue" is
+     * gone: an already-resolved Discover batch takes over; while its seed is
+     * still resolving the completion parks on [pendingRadioHandoff] —
+     * MediaPlayer callbacks must never block on network work — and with
+     * neither pending nor in-flight work the player shuts down cleanly.
+     */
+    private fun handleQueueEnd() {
+        val first = firstUnplayedRadioIndex()
+        when {
+            first != -1 -> startRadioHandoff(first)
+            radioSeedInFlight.get() -> {
+                Log.i("ABLE>", "queue end: radio seed in flight — parking the handoff")
+                pendingRadioHandoff = true
+            }
+            else -> stopAtQueueEnd()
+        }
+    }
+
+    /**
+     * Jump from the last completed song to the first Discover suggestion.
+     */
+    private fun startRadioHandoff(first: Int) {
+        Log.i("ABLE>", "radio handoff idx $currentIndex → $first")
+        pendingRadioHandoff = false
+        previousIndex = currentIndex
+        currentIndex = first
+        songChanged()
+        notifyIndexChanged()
+    }
+
+    /**
+     * Queue ended and there is nothing left to hand over to the radio
+     * (toggle OFF, failed or empty seed): clean shutdown instead of the old
+     * wrap-around. cleanUp notifies isExiting, so Player and MainActivity
+     * close themselves.
+     */
+    private fun stopAtQueueEnd() {
+        Log.i("ABLE>", "queue end: nothing left to play — stopping service")
+        stopForGood()
+    }
+
+    /**
+     * Index of the first Discover-sourced song strictly after the current
+     * index, or -1 when none. Deliberately a pure function of queue + index
+     * state instead of a stored marker: queue mutations (shuffle, mid-queue
+     * inserts, deletions) can never leave the handoff pointing at a stale
+     * index.
+     */
+    private fun firstUnplayedRadioIndex(): Int {
+        for (i in currentIndex + 1 until playQueue.size)
+            if (playQueue[i].source == SongSource.DISCOVER) return i
+        return -1
+    }
+
+    /**
+     * Fire the seed while the last queue song still plays — same idea as the
+     * one-ahead prefetch, applied to the radio. Fetch + resolution run on
+     * IO; the finished batch is appended on Main, flagged SongSource.DISCOVER.
+     * A batch, once resolved, is frozen: it never recomputes while playing,
+     * so the one-ahead prefetch only ever spends bytes on songs that will
+     * actually sound — the suggestion instability the user queue-end feature
+     * was careful to avoid.
+     */
+    private fun ensureRadioPrepared(seedSong: Song?) {
+        if (!radioAutoplayEnabled()) return
+        if (seedSong == null) return
+        if (seedSong.artist.isBlank() && seedSong.name.isBlank()) return
+        if (radioSeedInFlight.get()) return
+        if (firstUnplayedRadioIndex() != -1) return
+
+        val gen = radioGeneration
+        val seedArtist = seedSong.artist
+        val seedTitle = seedSong.name
+        Log.i("ABLE>", "radio[seed] '$seedTitle' — $seedArtist")
+        radioSeedInFlight.set(true)
+
+        launch(Dispatchers.IO) {
+            var batch: List<Song> = emptyList()
+            var source = SimilarSource.NONE
+            try {
+                val discovery = LastFmClient.similarTracksSmart(seedArtist, seedTitle)
+                source = discovery.source
+                Log.i(
+                    "ABLE>",
+                    "radio[discover] source=$source raw=${discovery.tracks.size}"
+                )
+                if (radioGeneration != gen) return@launch
+                batch = resolveRadioBatch(seedSong, discovery.tracks)
+            } catch (e: Exception) {
+                Log.e("ERR>", "radio seed failed: $e")
+            }
+            if (radioGeneration != gen) {
+                // The user queue was replaced meanwhile — drop everything.
+                radioSeedInFlight.set(false)
+                return@launch
+            }
+            launch(Dispatchers.Main) {
+                radioSeedInFlight.set(false)
+                appendRadioBatch(batch, source)
+            }
+        }
+    }
+
+    /** The Settings toggle, read live: flipping the switch takes effect on
+     *  the next queue end without a service restart. */
+    private fun radioAutoplayEnabled(): Boolean =
+        PreferenceManager.getDefaultSharedPreferences(this)
+            .getBoolean(PREF_RADIO_AUTOPLAY, true)
+
+    /**
+     * Turns suggestions into playable Songs: rejects the seed itself,
+     * intra-batch and already-queued duplicates (normalized name+artist
+     * before resolution, video ID after), drops tracks YouTube Music cannot
+     * resolve, and caps the batch. Blocking — IO only.
+     */
+    private fun resolveRadioBatch(seed: Song, tracks: List<TrackSuggestion>): List<Song> {
+        val queueKeys = HashSet<String>()
+        val queueIds = HashSet<String>()
+        for (s in playQueue) {
+            queueKeys.add(radioKey(s.name, s.artist))
+            Shared.getIdFromLink(s.youtubeLink)
+                .takeIf { it.isNotBlank() }?.let(queueIds::add)
+        }
+        val seedKey = radioKey(seed.name, seed.artist)
+        val seedId = Shared.getIdFromLink(seed.youtubeLink)
+        val seen = HashSet<String>()
+
+        val out = ArrayList<Song>()
+        for (t in tracks) {
+            if (out.size >= RADIO_BATCH_SIZE) break
+            val key = radioKey(t.name, t.artist)
+            if (key.isBlank() || !seen.add(key)) continue
+            val song = try { TrackResolver.resolve(t) } catch (e: Exception) { null } ?: continue
+            if (song.youtubeLink.isBlank()) continue
+            if (radioKey(song.name, song.artist) == seedKey) continue
+            if (queueKeys.contains(radioKey(song.name, song.artist))) continue
+            val id = Shared.getIdFromLink(song.youtubeLink).takeIf { it.isNotBlank() } ?: ""
+            if (id.isNotBlank() && (id == seedId || id in queueIds)) continue
+            song.source = SongSource.DISCOVER
+            out.add(song)
+        }
+        Log.i("ABLE>", "radio[resolve] ${out.size}/${tracks.size} usable")
+        return out
+    }
+
+    /** Order-stable, case/whitespace-insensitive identity for radio dedup. */
+    private fun radioKey(name: String, artist: String): String =
+        normalizeRadio(name) + "|" + normalizeRadio(artist)
+
+    private fun normalizeRadio(v: String): String =
+        v.lowercase(Locale.getDefault()).replace(Regex("\\s+"), " ").trim()
+
+    private fun appendRadioBatch(batch: List<Song>, source: SimilarSource) {
+        // Empty seed (offline, unknown artist, everything filtered/deduped):
+        // let the parked handoff re-evaluate — it will shut the player down.
+        if (batch.isEmpty()) {
+            Log.i("ABLE>", "radio batch empty ($source)")
+            if (pendingRadioHandoff) handleQueueEnd()
+            return
+        }
+        Log.i("ABLE>", "radio[batch] +${batch.size} queued via $source")
+        playQueue.addAll(batch)
+        launch(Dispatchers.Default) {
+            registeredClients.forEach { it.queueChanged(playQueue) }
+        }
+        maybePrefetchNext()
+
+        // Resume a completion that parked on the in-flight seed.
+        if (pendingRadioHandoff) {
+            pendingRadioHandoff = false
+            val first = firstUnplayedRadioIndex()
+            if (first != -1) startRadioHandoff(first)
+        }
+    }
+
+    /**
+     * Drop every bit of radio state; called whenever the user queue is
+     * replaced wholesale. In-flight seeds are invalidated via generation.
+     */
+    private fun resetRadioState() {
+        radioGeneration++
+        radioSeedInFlight.set(false)
+        pendingRadioHandoff = false
     }
 
     /**
      * @param song the song to be added to the play queue.
      */
     fun addToPlayQueue(song: Song) {
-        if (currentIndex != playQueue.size - 1) playQueue.add(currentIndex + 1, song)
+        // Append at the end of the user queue: before the first Discover
+        // suggestion after the current index, so the radio coda keeps playing
+        // after everything the user queued themselves.
+        val firstDiscover = (currentIndex + 1 until playQueue.size)
+            .firstOrNull { playQueue[it].source == SongSource.DISCOVER }
+        if (firstDiscover != null) playQueue.add(firstDiscover, song)
         else playQueue.add(song)
         launch(Dispatchers.Default) {
             registeredClients.forEach { it.queueChanged(playQueue) }
+        }
+    }
+
+    /**
+     * Starts [song] immediately, right after the current song. Everything
+     * already queued keeps its place behind it (used by the Player's
+     * "play now" on discovery suggestions).
+     */
+    fun playSongNow(song: Song) {
+        playQueue.add(currentIndex + 1, song)
+        setIndex(currentIndex + 1)
+    }
+
+    /** Clients listen to index advances to mirror the "what's up next"
+     *  state (queue sheet, shuffle order). */
+    private fun notifyIndexChanged() {
+        launch(Dispatchers.Default) {
+            registeredClients.forEach { it.indexChanged(currentIndex) }
         }
     }
 
@@ -572,6 +807,9 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
             Log.w("ERR>", "songChanged called with empty/invalid queue state")
             return
         }
+        // User-initiated playback retakes control from the parked queue-end
+        // handoff: a slowly resolving seed must not yank playback away later.
+        pendingRadioHandoff = false
         if (!isInstantiated) isInstantiated = true
         else {
             // Detach listeners BEFORE releasing: a player released during
@@ -809,7 +1047,14 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
      */
     private fun maybePrefetchNext() {
         val next = currentIndex + 1
-        if (next < 0 || next >= playQueue.size) return
+        if (next < 0 || next >= playQueue.size) {
+            // Nothing queued after the current song. Fire the Discover seed
+            // now, while the song still has minutes left to play, so the
+            // suggestions are resolved long before the queue runs out — the
+            // radio counterpart of the one-ahead prefetch below.
+            ensureRadioPrepared(playQueue.getOrNull(currentIndex))
+            return
+        }
         if (playQueue[next].filePath.isNotBlank()) return
         if (activeDownloads.contains(currentIndex)) return
         if (activeDownloads.contains(next)) return
@@ -990,6 +1235,17 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
         }
         if (wakeLock?.isHeld == true)
             wakeLock?.release()
+    }
+
+    /**
+     * Shared exit path for the notification kill switch and the queue-end
+     * shutdown: releases media resources and stops the foreground service.
+     */
+    private fun stopForGood() {
+        cleanUp()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     /**
