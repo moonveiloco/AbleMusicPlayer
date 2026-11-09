@@ -458,9 +458,7 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
         currentIndex = index
         Log.i("ABLE>", "setIndex $index '${playQueue.getOrNull(index)?.name ?: "?"}'")
         songChanged()
-        launch(Dispatchers.Default) {
-            registeredClients.forEach { it.indexChanged(currentIndex) }
-        }
+        notifyIndexChanged()
     }
 
     /**
@@ -516,9 +514,7 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
             registeredClients.forEach { it.queueChanged(playQueue) }
         }
 
-        launch(Dispatchers.Default) {
-            registeredClients.forEach { it.indexChanged(currentIndex) }
-        }
+        notifyIndexChanged()
     }
 
     /**
@@ -532,6 +528,7 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
             if (currentIndex == 0) currentIndex = playQueue.size - 1
             else currentIndex--
             songChanged()
+            notifyIndexChanged()
         }
     }
 
@@ -554,6 +551,7 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
         if (currentIndex + 1 < playQueue.size) {
             currentIndex++
             songChanged()
+            notifyIndexChanged()
         } else {
             handleQueueEnd()
         }
@@ -589,6 +587,7 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
         previousIndex = currentIndex
         currentIndex = first
         songChanged()
+        notifyIndexChanged()
     }
 
     /**
@@ -750,10 +749,33 @@ class MusicService : Service(), AudioManager.OnAudioFocusChangeListener, Corouti
      * @param song the song to be added to the play queue.
      */
     fun addToPlayQueue(song: Song) {
-        if (currentIndex != playQueue.size - 1) playQueue.add(currentIndex + 1, song)
+        // Append at the end of the user queue: before the first Discover
+        // suggestion after the current index, so the radio coda keeps playing
+        // after everything the user queued themselves.
+        val firstDiscover = (currentIndex + 1 until playQueue.size)
+            .firstOrNull { playQueue[it].source == SongSource.DISCOVER }
+        if (firstDiscover != null) playQueue.add(firstDiscover, song)
         else playQueue.add(song)
         launch(Dispatchers.Default) {
             registeredClients.forEach { it.queueChanged(playQueue) }
+        }
+    }
+
+    /**
+     * Starts [song] immediately, right after the current song. Everything
+     * already queued keeps its place behind it (used by the Player's
+     * "play now" on discovery suggestions).
+     */
+    fun playSongNow(song: Song) {
+        playQueue.add(currentIndex + 1, song)
+        setIndex(currentIndex + 1)
+    }
+
+    /** Clients listen to index advances to mirror the "what's up next"
+     *  state (queue sheet, shuffle order). */
+    private fun notifyIndexChanged() {
+        launch(Dispatchers.Default) {
+            registeredClients.forEach { it.indexChanged(currentIndex) }
         }
     }
 

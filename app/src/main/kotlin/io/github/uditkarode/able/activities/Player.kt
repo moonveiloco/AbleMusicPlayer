@@ -285,9 +285,11 @@ class Player : MusicClientActivity() {
                 MaterialDialog(this@Player, BottomSheet()).show {
                     customListAdapter(
                         SongAdapter(
+                            // Up-Next only: the playing song itself is not
+                            // part of the queue window.
                             ArrayList(
                                 mService.getPlayQueue().subList(
-                                    mService.getCurrentIndex(),
+                                    (mService.getCurrentIndex() + 1).coerceIn(0, mService.getPlayQueue().size),
                                     mService.getPlayQueue().size
                                 )
                             ),
@@ -1096,8 +1098,7 @@ class Player : MusicClientActivity() {
                 when (index) {
                     0 -> resolveSuggestion(suggestion) { song ->
                         val svc = mService ?: return@resolveSuggestion
-                        svc.addToPlayQueue(song)
-                        svc.setIndex(MusicService.currentIndex + 1) // starts playing
+                        svc.playSongNow(song) // queue-adjacent insert + start playing
                     }
                     1 -> resolveSuggestion(suggestion) { song ->
                         mService?.addToPlayQueue(song) // now notifies queueChanged

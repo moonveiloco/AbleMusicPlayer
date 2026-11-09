@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Caption row shown in the Up-Next sheet when nothing comes after the
+     currently playing song (the playing row itself is never listed). -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/queue_empty_label"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="center"
+    android:paddingStart="14dp"
+    android:paddingEnd="14dp"
+    android:paddingTop="24dp"
+    android:paddingBottom="24dp"
+    android:textColor="#808080"
+    android:textSize="14sp" />

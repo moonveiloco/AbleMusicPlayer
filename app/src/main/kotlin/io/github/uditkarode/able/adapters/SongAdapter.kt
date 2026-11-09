@@ -84,27 +84,42 @@ class SongAdapter(
                     .inflate(R.layout.rv_discover_header, parent, false)
             )
 
+        if (viewType == TYPE_EMPTY)
+            return EmptyVH(
+                LayoutInflater.from(parent.context)
+                    .inflate(R.layout.rv_queue_empty, parent, false)
+            )
+
         val layoutId = if (showArt) R.layout.song_img else R.layout.rv_item
         return RVVH(LayoutInflater.from(parent.context).inflate(layoutId, parent, false), showArt)
     }
 
-    override fun getItemViewType(position: Int): Int =
-        if (position == discoverHeaderPosition()) TYPE_DISCOVER_HEADER else TYPE_SONG
+    override fun getItemViewType(position: Int): Int = when {
+        songList.isEmpty() && !showArt -> TYPE_EMPTY
+        position == discoverHeaderPosition() -> TYPE_DISCOVER_HEADER
+        else -> TYPE_SONG
+    }
 
     private var originalLength = songList.size
 
     /** Row count includes the "Discover" section header when this list (the
-     *  Up-Next queue) contains automatically appended suggestions. */
-    override fun getItemCount(): Int =
-        songList.size + if (discoverHeaderPosition() != -1) 1 else 0
+     *  Up-Next queue) contains automatically appended suggestions, and the
+     *  "nothing queued" caption row when the Up-Next list is empty. */
+    override fun getItemCount(): Int {
+        if (songList.isEmpty() && !showArt) return 1
+        return songList.size + if (discoverHeaderPosition() != -1) 1 else 0
+    }
 
-    private var currentIndex = -1
+    /** Seeded from the bound service so the Up-Next slicing is correct from
+     *  the very first frame: registerClient does not replay current state. */
+    private var currentIndex = mServiceFromPlayer?.getCurrentIndex() ?: -1
     private var onShuffle = false
     private lateinit var playingSong: Song
 
     private companion object {
         const val TYPE_SONG = 0
         const val TYPE_DISCOVER_HEADER = 1
+        const val TYPE_EMPTY = 2
     }
 
     /**
@@ -117,6 +132,26 @@ class SongAdapter(
         for (i in songList.indices)
             if (songList[i].source == SongSource.DISCOVER) return i
         return -1
+    }
+
+    /**
+     * Up-Next pane: show only what comes after the currently playing song —
+     * the playing row itself never appears. Reads the service queue + index
+     * as one snapshot and swaps the list on Main (callbacks arrive on the
+     * service's dispatcher).
+     */
+    private fun recomputeUpNext() {
+        if (showArt) return
+        val service = mServiceFromPlayer ?: wr?.get()?.mService?.value ?: return
+        val queue = service.getPlayQueue()
+        val start = service.getCurrentIndex() + 1
+        val next = if (start < queue.size)
+            ArrayList(queue.subList(start, queue.size))
+        else ArrayList()
+        launch(Dispatchers.Main) {
+            songList = next
+            notifyDataSetChanged()
+        }
     }
 
     /** Song index in [songList] for a RecyclerView row; -1 = header row or
@@ -133,6 +168,10 @@ class SongAdapter(
         if (holder is DiscoverHeaderVH) {
             holder.label.text =
                 holder.label.context.getString(R.string.radio_section_discover)
+            return
+        }
+        if (holder is EmptyVH) {
+            holder.label.text = holder.label.context.getString(R.string.queue_empty)
             return
         }
         if (holder !is RVVH) return
@@ -266,13 +305,8 @@ class SongAdapter(
                         0 -> {
                             if (mServiceFromPlayer == null)
                                 wr?.get()?.mService!!.value!!.addToQueue(current)
-                            else {
+                            else
                                 mServiceFromPlayer.addToPlayQueue(current)
-                                songList.add(1, songList[songPos])
-                                songList.removeAt(songPos)
-                                // Full refresh: the Discover header may shift.
-                                notifyDataSetChanged()
-                            }
                         }
 
                         1 -> {
@@ -360,6 +394,12 @@ class SongAdapter(
         val label: TextView = itemView.findViewById(R.id.discover_section_label)
     }
 
+    /** Single caption row shown when nothing comes after the currently
+     *  playing song (the sheet never lists the playing row itself). */
+    class EmptyVH(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        val label: TextView = itemView.findViewById(R.id.queue_empty_label)
+    }
+
     fun getSong(position: Int): Song = songList[position]
 
     fun removeAt(position: Int) {
@@ -434,10 +474,9 @@ class SongAdapter(
     override fun isExiting() {}
 
     override fun queueChanged(arrayList: ArrayList<Song>) {
-        if (!showArt) {
-            songList = arrayList
-            notifyDataSetChanged()
-        }
+        // The service queue is the source of truth; the Up-Next pane shows
+        // only the rows after the playing song.
+        if (!showArt) recomputeUpNext()
     }
 
     override fun shuffleRepeatChanged(onShuffle: Boolean, onRepeat: Boolean) {
@@ -446,6 +485,9 @@ class SongAdapter(
 
     override fun indexChanged(index: Int) {
         currentIndex = index
+        // Progress through the queue live: the playing row leaves the
+        // Up-Next pane as soon as it starts.
+        if (!showArt) recomputeUpNext()
     }
 
     override fun isLoading(doLoad: Boolean) {}
