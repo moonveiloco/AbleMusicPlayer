@@ -28,4 +28,5 @@ class Song(
     val albumId: Long = -1,
     var album: String = "",
     var isLocal: Boolean = false,
+    var source: SongSource = SongSource.USER,
 )

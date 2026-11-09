@@ -31,6 +31,9 @@ Questo è necessario per scaricare brani nella memoria interna.</string>
     <string name="unexpected_err">Qualcosa è andato storto. Per favore segnalacelo!</string>
     <string name="pref_fmt">Seleziona il formato audio predefinito per salvare i brani.</string>
     <string name="pref_search">Seleziona la tua sorgente di ricerca preferita.</string>
+    <string name="settings_radio_autoplay_title">Radio Discover a fine coda</string>
+    <string name="settings_radio_autoplay_summary">Quando la coda finisce, continua con i brani suggeriti Discover dell\'ultimo brano in play. Off: il player si chiude invece di ripartire.</string>
+    <string name="radio_section_discover">Discover</string>
     <string name="pref_about">Dai un\'occhiata alle persone che stanno dietro Able!</string>
     <string name="fmt">Formato</string>
     <string name="src">Fonte</string>

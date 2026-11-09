@@ -39,6 +39,14 @@
         android:summary="@string/pref_grid_columns_sum"
         />
 
+    <SwitchPreferenceCompat
+        android:key="radio_autoplay"
+        android:defaultValue="true"
+        app:iconSpaceReserved="false"
+        android:title="@string/settings_radio_autoplay_title"
+        android:summary="@string/settings_radio_autoplay_summary"
+        />
+
     <Preference
         android:title="@string/downloads_title"
         app:iconSpaceReserved="false"

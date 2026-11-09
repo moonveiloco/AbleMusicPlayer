@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Section label row shown in the Player's Up-Next sheet before the
+     automatically appended Discover suggestions (end-of-queue radio). -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/discover_section_label"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingStart="14dp"
+    android:paddingEnd="14dp"
+    android:paddingTop="16dp"
+    android:paddingBottom="6dp"
+    android:textAllCaps="true"
+    android:textColor="#808080"
+    android:textSize="12sp" />

@@ -45,6 +45,7 @@ import com.google.android.material.button.MaterialButton
 import io.github.uditkarode.able.R
 import io.github.uditkarode.able.fragments.Home
 import io.github.uditkarode.able.model.song.Song
+import io.github.uditkarode.able.model.song.SongSource
 import io.github.uditkarode.able.model.song.SongState
 import io.github.uditkarode.able.services.MusicService
 import io.github.uditkarode.able.utils.Constants
@@ -66,30 +67,79 @@ class SongAdapter(
     private val wr: WeakReference<Home>? = null,
     private val showArt: Boolean = false,
     private val mServiceFromPlayer: MusicService? = null
-) : RecyclerView.Adapter<SongAdapter.RVVH>(), CoroutineScope, MusicService.MusicClient {
+) : RecyclerView.Adapter<RecyclerView.ViewHolder>(), CoroutineScope, MusicService.MusicClient {
     private var registered = false
 
     override val coroutineContext = Dispatchers.Main + SupervisorJob()
 
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RVVH {
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         if (!registered) {
             registered = true
             MusicService.registerClient(this)
         }
 
+        if (viewType == TYPE_DISCOVER_HEADER)
+            return DiscoverHeaderVH(
+                LayoutInflater.from(parent.context)
+                    .inflate(R.layout.rv_discover_header, parent, false)
+            )
+
         val layoutId = if (showArt) R.layout.song_img else R.layout.rv_item
         return RVVH(LayoutInflater.from(parent.context).inflate(layoutId, parent, false), showArt)
     }
 
+    override fun getItemViewType(position: Int): Int =
+        if (position == discoverHeaderPosition()) TYPE_DISCOVER_HEADER else TYPE_SONG
+
     private var originalLength = songList.size
-    override fun getItemCount() = songList.size
+
+    /** Row count includes the "Discover" section header when this list (the
+     *  Up-Next queue) contains automatically appended suggestions. */
+    override fun getItemCount(): Int =
+        songList.size + if (discoverHeaderPosition() != -1) 1 else 0
 
     private var currentIndex = -1
     private var onShuffle = false
     private lateinit var playingSong: Song
 
-    override fun onBindViewHolder(holder: RVVH, position: Int) {
-        val current = songList[position]
+    private companion object {
+        const val TYPE_SONG = 0
+        const val TYPE_DISCOVER_HEADER = 1
+    }
+
+    /**
+     * Row position of the "Discover" section header: immediately before the
+     * first automatically appended suggestion. -1 when the list holds no
+     * Discover rows (library/song lists of USER songs never do).
+     */
+    private fun discoverHeaderPosition(): Int {
+        if (showArt) return -1
+        for (i in songList.indices)
+            if (songList[i].source == SongSource.DISCOVER) return i
+        return -1
+    }
+
+    /** Song index in [songList] for a RecyclerView row; -1 = header row or
+     *  out-of-bounds position. */
+    private fun songForRow(rowPos: Int, headerPos: Int): Int =
+        when {
+            rowPos < 0 -> -1
+            headerPos != -1 && rowPos == headerPos -> -1
+            headerPos != -1 && rowPos > headerPos -> rowPos - 1
+            else -> rowPos
+        }
+
+    override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+        if (holder is DiscoverHeaderVH) {
+            holder.label.text =
+                holder.label.context.getString(R.string.radio_section_discover)
+            return
+        }
+        if (holder !is RVVH) return
+        val headerPos = discoverHeaderPosition()
+        val songPos = songForRow(position, headerPos)
+        if (songPos == -1) return
+        val current = songList[songPos]
         holder.songName.text = current.name
         holder.artistName.text = current.artist
         if (showArt) {
@@ -145,8 +195,11 @@ class SongAdapter(
         holder.itemView.setOnClickListener {
             if (current.placeholder) return@setOnClickListener
 
-            val clickPosition = holder.bindingAdapterPosition
-            if (clickPosition == RecyclerView.NO_POSITION) return@setOnClickListener
+            val clickRow = holder.bindingAdapterPosition
+            if (clickRow == RecyclerView.NO_POSITION) return@setOnClickListener
+            // Row → song index: subtract the Discover section header.
+            val clickPosition = songForRow(clickRow, headerPos)
+            if (clickPosition == -1) return@setOnClickListener
 
             var freshStart = false
             if (!Shared.serviceRunning(MusicService::class.java, holder.itemView.context)) {
@@ -215,9 +268,10 @@ class SongAdapter(
                                 wr?.get()?.mService!!.value!!.addToQueue(current)
                             else {
                                 mServiceFromPlayer.addToPlayQueue(current)
-                                songList.add(1, songList[position])
-                                songList.removeAt(position)
-                                notifyItemMoved(position, 1)
+                                songList.add(1, songList[songPos])
+                                songList.removeAt(songPos)
+                                // Full refresh: the Discover header may shift.
+                                notifyDataSetChanged()
                             }
                         }
 
@@ -268,13 +322,13 @@ class SongAdapter(
 
                     curFile.delete()
                     curArt.delete()
-                    songList.removeAt(position)
+                    songList.removeAt(songPos)
                     MediaScannerConnection.scanFile(
                         context,
                         arrayOf(current.filePath), null, null
                     )
-                    notifyItemRemoved(position)
-                    notifyItemRangeChanged(position, songList.size - position)
+                    // Full refresh: the Discover header may shift.
+                    notifyDataSetChanged()
                 }
                 negativeButton(text = holder.itemView.context.getString(R.string.cancel))
             }
@@ -298,6 +352,12 @@ class SongAdapter(
         var albumArt: ImageView? = if (showArt) itemView.findViewById(R.id.song_art) else null
 
         fun getContext(): Context = itemView.context
+    }
+
+    /** Section label row rendered right before the automatically appended
+     *  Discover suggestions in the Up-Next sheet. */
+    class DiscoverHeaderVH(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        val label: TextView = itemView.findViewById(R.id.discover_section_label)
     }
 
     fun getSong(position: Int): Song = songList[position]

@@ -63,7 +63,7 @@ The core communication mechanism. `MusicService` is a foreground service managin
 
 ### Data Models (`:core:model`)
 
-- **`Song`** — Central model: `name`, `artist`, `youtubeLink`, `filePath`, `placeholder`, `ytmThumbnail`, `albumId`, `album`, `isLocal`. `youtubeLink` is populated for library songs too (read back from the file's video-ID tag at scan time)
+- **`Song`** — Central model: `name`, `artist`, `youtubeLink`, `filePath`, `placeholder`, `ytmThumbnail`, `albumId`, `album`, `isLocal`, `source` (`SongSource`: `USER`/`DISCOVER` — see *Discover radio at queue end*). `youtubeLink` is populated for library songs too (read back from the file's video-ID tag at scan time)
 - **`SongState`** — `playing` / `paused`
 - **`MusicMode`** — `"Download"` / `"Stream"`
 - **`Format`** — `MODE_MP3` / `MODE_WEBM`
@@ -112,6 +112,19 @@ files):
 ## Playback Pipeline (progressive streaming)
 
 `MusicService` resolves the best audio stream via `StreamInfo.getInfo` and plays it through `StreamProxy`, a local HTTP proxy that starts serving the audio to `MediaPlayer` immediately while the incoming bytes are cached to disk; when the file completes it hands off to the file-based playback path (unified handoff, no restart). The next song is prefetched in the background (`maybePrefetchNext`). Verified behavior: first playback in ~2–4s, instant skip-back on freshly cached songs, zero errors in steady state.
+
+## Discover radio at queue end
+
+When the user queue runs out, playback no longer restarts from the top of the queue (the old wrap-around in `nextSong` is gone). Instead the *Discover radio* of the last played song takes over, seeded exactly like the Player's Discovery button (`LastFmClient.similarTracksSmart` — Last.fm cascade with keyless Deezer radio fallback, no key prompt at service level).
+
+Semantics (Settings switch `radio_autoplay`, "Radio Discover a fine coda", default ON):
+
+- **Seeding** fires from `maybePrefetchNext`'s empty end-of-queue slot, i.e. while the last queue song still plays (`ensureRadioPrepared`): suggestions are fetched and resolved (`TrackResolver` → YouTube Music search) on IO, and the finished batch (cap 10, `RADIO_BATCH_SIZE`) is appended to `playQueue` on Main, flagged `SongSource.DISCOVER`. A batch is **frozen** once appended — it never recomputes while it plays, so the one-ahead prefetch only downloads songs that will actually sound. Downloads remain lazy via the normal pipeline; only resolution is done early.
+- **Dedup** drops the seed itself, intra-batch duplicates and queue members (normalized name+artist pre-resolution, video ID post-resolution).
+- **Handoff** (`handleQueueEnd`): an appended batch starts via `firstUnplayedRadioIndex()` — a pure function of queue+index state (robust to shuffle/mid-queue inserts/deletions, no stored index); a seed still in flight parks the completion on `pendingRadioHandoff` (resume on append; `songChanged` cancels the park when the user plays something themselves); no suggestions available → **clean shutdown** (`stopForGood`: cleanUp → `isExiting()` → Player/MainActivity finish → service stops).
+- **Radio is infinite**: each batch, once its last item starts playing, seeds the next batch from the current (Discover) song. `setQueue` (`resetRadioState`) invalidates in-flight seeds via a generation counter; mid-queue manual additions (`addToPlayQueue`) simply shift ahead of the batch.
+- **UI**: the Player's Up-Next sheet (`SongAdapter` with `showArt=false`) renders the Discover songs under a section header row (`rv_discover_header.xml`, string `radio_section_discover`), so the coda/Discover distinction stays visible. Row↔song position mapping accounts for the header. Songs added manually from the Player's discovery sheet stay `USER` — only the automatic end-of-queue radio flags `DISCOVER`.
+- Songs tagged `DISCOVER` are ordinary `Song`s: covers, save-to-playlist, download button and video-ID tags all work through the existing pipes. Repeat-one always precedes the radio (loop unchanged).
 
 ## View Mode & Grid Columns
 
