@@ -100,7 +100,10 @@ implementation(libs.lottie)
     implementation(libs.jetbrains.kotlinx.coroutines.android)
     implementation(libs.lifecycle.viewmodel.ktx)
     annotationProcessor(libs.glide.compiler)
-    implementation(files("src/main/libs/ffmpeg-kit.aar"))
+    // FFmpegKit rebuilt for Android 16 KB page-size support (the upstream
+    // arthenica artifacts were retired and deleted from Maven Central).
+    // Same com.arthenica.ffmpegkit API, LGPL, arm64-v8a + armeabi-v7a.
+    implementation("com.moizhassan.ffmpeg:ffmpeg-kit-16kb:6.1.1")
     implementation("com.arthenica:smart-exception-java:0.2.1")
 }
 

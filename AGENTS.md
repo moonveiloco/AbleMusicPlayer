@@ -194,7 +194,7 @@ Initialized once in `MainActivity.onCreate()` via `NewPipe.init(CustomDownloader
 | Library | Purpose |
 |---|---|
 | NewPipeExtractor v0.26.5 | YouTube search, stream URL extraction, playlist enumeration |
-| mobile-ffmpeg (local .aar) | Audio transcoding, metadata writing |
+| ffmpeg-kit — `com.moizhassan.ffmpeg:ffmpeg-kit-16kb:6.1.1` | FFmpegKit wrapper for audio transcoding & metadata. Same `com.arthenica.ffmpegkit` API as the retired upstream; rebuilt with **16 KB page-size alignment** (LOAD `0x4000`) so it loads on 4 KB *and* 16 KB kernel configurations. Replaces the vendored `ffmpeg-kit.aar` 4 KB-only AAR |
 | OkHttp 5.3.2 | HTTP client for NewPipe downloader and streaming |
 | Glide 5.0.5 | Image loading (album art, thumbnails) |
 | Gson 2.13.2 | Playlist JSON serialization |
